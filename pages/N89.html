@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<script>
+// ========== FACEBOOK PIXEL (mesmo do original) ==========
+!function(f,b,e,v,n,t,s){
+if(f.fbq)return;n=f.fbq=function(){n.callMethod?
+n.callMethod.apply(n,arguments):n.queue.push(arguments)};
+if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
+n.queue=[];t=b.createElement(e);t.async=!0;
+t.src=v;s=b.getElementsByTagName(e)[0];
+s.parentNode.insertBefore(t,s)
+}(window, document,'script','https://connect.facebook.net/en_US/fbevents.js');
+
+function gerarId(){
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789'
+  let id = ''
+  for(let i = 0; i < 8; i++) id += chars.charAt(Math.floor(Math.random() * chars.length))
+  return id
+}
+function getUserId(){
+  let id = localStorage.getItem('user_id')
+  if(!id || id.length !== 8){ id = gerarId(); localStorage.setItem('user_id', id) }
+  return id
+}
+const userId = getUserId()
+
+fbq('init', '971266505644349', { external_id: userId })
+fbq('track', 'PageView', { external_id: userId })
+
+function enviarEvento(valor){
+  if(!valor) return
+  const nome = valor.replace(/[^a-zA-Z0-9]/g, "")
+  if(!nome) return
+  try { fbq('trackCustom', nome, { external_id: userId }) } catch {}
+}
+</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body>
+<script>
+(async function(){
+
+const DEBUG = false // mude para true para testar
+
+const params = new URLSearchParams(window.location.search)
+
+const ENABLE_PARIDADE = (() => {
+  const urlParam = params.get("paridade")
+  if(urlParam !== null) return urlParam === "1"
+  return true
+})()
+
+const SHEETS_URL = "https://script.google.com/macros/s/AKfycby_ejOA_7nbW9nVFwkPyJxTSXTMEnbP8Jn6ENMtHYyZm9Ua6eERRWOQeQ7EuD133YGq/exec"
+
+function timeout(promise, ms, fallback){
+  return Promise.race([promise, new Promise(res => setTimeout(() => res(fallback), ms))])
+}
+
+// =========================================================
+// PARAMS LINK + UC
+// =========================================================
+let LINK = null, UC = null
+const raw = params.get("dest")
+if(raw && raw.includes("|||")){
+  const p = raw.split("|||"); LINK = p[0]; UC = p[1]
+} else {
+  LINK = params.get("dest"); UC = params.get("uc")
+}
+if(!LINK || !UC) throw new Error("Parametros invalidos")
+
+// =========================================================
+// PLACEMENT + SOURCE
+// =========================================================
+const plRaw  = (params.get("pl")  || "").toLowerCase().trim()
+const srcRaw = (params.get("src") || "").toLowerCase().trim()
+
+function classPlacement(p){
+  if(!p || p.includes("{{")) return "PU"
+  const n = p.replace(/[_\s-]/g, "")
+  if(n.includes("profilereels"))  return "PP"
+  if(n.includes("reelsoverlay"))  return "PV"
+  if(n.includes("reels"))         return "PR"
+  if(n.includes("stories"))       return "PS"
+  if(n.includes("explorehome"))   return "PH"
+  if(n.includes("explore"))       return "PE"
+  if(n.includes("search"))        return "PQ"
+  if(n.includes("marketplace"))   return "PM"
+  if(n.includes("instream"))      return "PI"
+  if(n.includes("video"))         return "PI"
+  if(n.includes("messenger"))     return "PG"
+  if(n.includes("audience"))      return "PA"
+  if(n.includes("feed"))          return "PF"
+  return "PO"
+}
+function classSrc(s){
+  if(!s || s.includes("{{")) return "SU"
+  if(s === "ig")  return "SI"
+  if(s === "fb")  return "SF"
+  if(s === "msg") return "SM"
+  if(s === "an")  return "SA"
+  return "SU"
+}
+const placementTag = classPlacement(plRaw)
+const sourceTag    = classSrc(srcRaw)
+
+// =========================================================
+// GEOLOCALIZAÇÃO (com cache)
+// =========================================================
+async function fetchGeoFromAPI(url) {
+  const resp = await fetch(url, { signal: AbortSignal.timeout(2000) })
+  if (!resp.ok) throw new Error("bad response")
+  return resp.json()
+}
+function extrairGeo(d) {
+  const rc = (d.region_code || "").replace(/[^A-Za-z]/g, "").toUpperCase()
+  const state = rc.length === 2 ? rc : "ZZ"
+  const cityRaw = (d.city || "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z]/g, "")
+    .toUpperCase()
+  const city = cityRaw.slice(0, 6) || "ZZ"
+  return { state, city, city_full: d.city || "", state_full: d.region || "" }
+}
+const GEO_CACHE_KEY = "geo_cache"
+const GEO_CACHE_TTL = 30 * 60 * 1000
+async function medirGeo() {
+  try {
+    const cached = JSON.parse(sessionStorage.getItem(GEO_CACHE_KEY))
+    if (cached && cached.expires > Date.now()) return cached.data
+  } catch {}
+  const apis = [
+    () => fetchGeoFromAPI("https://ipapi.co/json/"),
+    () => fetchGeoFromAPI("https://ipwho.is/"),
+    () => fetchGeoFromAPI("https://freeipapi.com/api/json")
+  ]
+  let data = null
+  for (const apiFn of apis) {
+    try {
+      const json = await apiFn()
+      data = extrairGeo(json)
+      if (data.state !== "ZZ" || data.city !== "ZZ") break
+    } catch {}
+  }
+  if (!data) {
+    try {
+      const cached = JSON.parse(sessionStorage.getItem(GEO_CACHE_KEY))
+      if (cached && cached.data) data = cached.data
+    } catch {}
+  }
+  if (!data) data = { state: "ZZ", city: "ZZ", city_full: "", state_full: "" }
+  try {
+    sessionStorage.setItem(GEO_CACHE_KEY, JSON.stringify({ data, expires: Date.now() + GEO_CACHE_TTL }))
+  } catch {}
+  return data
+}
+
+// =========================================================
+// VELOCIDADE
+// =========================================================
+function classificarVel(mbps){
+  if(mbps <= 0.5) return 1
+  if(mbps <= 1)   return 3
+  if(mbps <= 5)   return 6
+  if(mbps <= 10)  return 8
+  if(mbps <= 20)  return 10
+  return 14
+}
+async function medirVelocidade(){
+  try { return "N" + classificarVel(navigator.connection?.downlink || 5) }
+  catch { return "N6" }
+}
+
+// =========================================================
+// BATERIA
+// =========================================================
+async function medirBateria(){
+  try {
+    const bat = await navigator.getBattery()
+    const pct  = Math.round(bat.level * 10)
+    return { bateria: pct < 2 ? "BL" : "B" + pct, carregando: bat.charging ? "C1" : "C0" }
+  } catch { return { bateria: "", carregando: "" } }
+}
+
+// =========================================================
+// MOVIMENTO
+// =========================================================
+function medirMovimento(){
+  return new Promise(resolve => {
+    let det = false
+    function h(e){
+      const a = e.accelerationIncludingGravity
+      if(!a) return
+      if(Math.abs(a.x||0)+Math.abs(a.y||0)+Math.abs(a.z||0) > 15) det = true
+    }
+    if(typeof DeviceMotionEvent !== "undefined"){
+      window.addEventListener("devicemotion", h)
+      setTimeout(() => { window.removeEventListener("devicemotion", h); resolve(det?"M1":"M0") }, 120)
+    } else resolve("M0")
+  })
+}
+
+// =========================================================
+// RAM
+// =========================================================
+function medirRAM(){
+  const ram = navigator.deviceMemory || 4
+  if(ram <= 2) return "R1"
+  if(ram <= 4) return "R2"
+  if(ram <= 8) return "R3"
+  return "R4"
+}
+
+// =========================================================
+// WEBRTC
+// =========================================================
+function medirWebRTC(){
+  return new Promise(resolve => {
+    try {
+      const pc = new RTCPeerConnection({ iceServers: [] })
+      const ips = new Set(); let enc = false
+      function encerrar(){
+        if(enc) return; enc = true; try{pc.close()}catch{}
+        let tag = "RU"
+        for(const ip of [...ips]){
+          if(/^10\./.test(ip))                           { tag="RC"; break }
+          if(/^172\.(1[6-9]|2\d|3[01])\./.test(ip))     { tag="RV"; break }
+          if(/^192\.168\./.test(ip))                       tag="RH"
+        }
+        resolve(tag)
+      }
+      pc.onicecandidate = e => {
+        if(!e||!e.candidate){ encerrar(); return }
+        const m = e.candidate.candidate.match(/(\d+\.\d+\.\d+\.\d+)/)
+        if(m) ips.add(m[1])
+      }
+      pc.createDataChannel('')
+      pc.createOffer().then(o=>pc.setLocalDescription(o)).catch(()=>resolve("RU"))
+      setTimeout(()=>encerrar(), 850)
+    } catch { resolve("RU") }
+  })
+}
+
+function getCookie(name){
+  const m = document.cookie.match(new RegExp('(^| )'+name+'=([^;]+)'))
+  return m ? m[2] : ""
+}
+
+// =========================================================
+// SINCRONO
+// =========================================================
+const tema   = window.matchMedia('(prefers-color-scheme: dark)').matches ? "D" : "L"
+const ua     = navigator.userAgent || ""
+const device = /android/i.test(ua) ? "A" : /iphone|ipad|ipod/i.test(ua) ? "I" : "O"
+const vib    = navigator.vibrate ? "V1" : "V0"
+const conexao = (() => {
+  const c = navigator.connection
+  if(!c) return "U"
+  if(c.type==="wifi") return "W"
+  if(c.type==="cellular") return "M"
+  return "U"
+})()
+
+// =========================================================
+// PARALELO (mede tudo)
+// =========================================================
+const [velTag, batObj, movimento, redeTag, geo] = await Promise.all([
+  timeout(medirVelocidade(), 200,  "N6"),
+  timeout(medirBateria(),    200,  { bateria:"", carregando:"" }),
+  timeout(medirMovimento(),  200,  "M0"),
+  timeout(medirWebRTC(),     950,  "RU"),
+  timeout(medirGeo(),        2500, { state:"ZZ", city:"ZZ", city_full:"", state_full:"" })
+])
+const ram = medirRAM()
+
+const stateTag = geo.state
+const cityTag  = geo.city
+
+// =========================================================
+// TEMPORAIS
+// =========================================================
+let paridadeTag = null
+if(ENABLE_PARIDADE){
+  const agora = new Date()
+  paridadeTag = agora.getMinutes() % 2 === 0 ? "Par" : "Impar"
+}
+
+const agoraData  = new Date()
+const hora       = agoraData.getHours()
+const minuto     = agoraData.getMinutes()
+const segundo    = agoraData.getSeconds()
+const dia        = agoraData.getDate()
+const diaSemana  = ["Domingo","Segunda","Terca","Quarta","Quinta","Sexta","Sabado"][agoraData.getDay()]
+
+const minDezena  = Math.floor(minuto/10) % 2 === 0 ? "Par" : "Impar"
+const minUnidade = (minuto%10) % 2 === 0 ? "Par" : "Impar"
+const segMetade  = segundo <= 30 ? "Seg0030" : "Seg3160"
+const horaPar    = hora % 2 === 0 ? "Par" : "Impar"
+const diaPar     = dia  % 2 === 0 ? "Par" : "Impar"
+
+let periodo = "Noite"
+if(hora >= 6  && hora <= 11) periodo = "Manha"
+else if(hora >= 12 && hora <= 17) periodo = "Tarde"
+
+const bNum = parseInt((batObj.bateria.match(/\d+/)||[0])[0])
+const bPar = isNaN(bNum) ? null : (bNum%2===0?"Par":"Impar")
+const nNum = parseInt((velTag.match(/\d+/)||[0])[0])
+const nPar = isNaN(nNum) ? null : (nNum%2===0?"Par":"Impar")
+
+// ========== LEITURA INTELIGENTE DO _fbp (com retry) ==========
+// Essa é a única melhoria em relação ao original
+async function getFbpWithRetry(maxTentativas = 5, intervaloMs = 100) {
+  for (let i = 0; i < maxTentativas; i++) {
+    const fbp = getCookie("_fbp");
+    if (fbp && fbp !== "") return fbp;
+    await new Promise(r => setTimeout(r, intervaloMs));
+  }
+  return "";
+}
+const fbpValue = await getFbpWithRetry(5, 100);
+const FBP = (fbpValue !== "") ? 1 : 0;
+const fbcValue = getCookie("_fbc") || params.get("fbclid") || "";
+const FBC = (fbcValue !== "") ? 1 : 0;
+
+const HP_PADRAO = 20
+const hp = HP_PADRAO
+const baseUC   = UC.replace(/[^a-zA-Z0-9]/g, "").slice(0, 16)
+const tempoTag = "T1"
+
+let horaTag
+if(hp===1){
+  horaTag = "H" + String(hora).padStart(2,"0")
+} else {
+  const bucket = Math.min(Math.floor(minuto*hp/60), hp-1)
+  horaTag = "H" + String(hora).padStart(2,"0") + "M" + bucket
+}
+
+const browserTag = /EX(?=ID)/i.test(UC) ? "EX" : /IX(?=ID)/i.test(UC) ? "IX" : "Outros"
+
+// =========================================================
+// EVENTOS META (idêntico ao original)
+// =========================================================
+const eventosBasicos = [
+  tempoTag, velTag, batObj.bateria, batObj.carregando,
+  tema, ram, vib, device, conexao, movimento, redeTag,
+  placementTag, sourceTag,
+  stateTag, cityTag,
+  minDezena, minUnidade, segMetade, horaPar,
+  diaSemana, diaPar, periodo,
+  (bPar!==null?bPar:""), (nPar!==null?nPar:""),
+  "FBP"+FBP, "FBC"+FBC
+]
+if(ENABLE_PARIDADE && paridadeTag) eventosBasicos.push(paridadeTag)
+eventosBasicos.forEach(enviarEvento)
+enviarEvento(horaTag)
+
+// =========================================================
+// RUNTIME MAP (para regras TOP - vazio)
+// =========================================================
+const RUNTIME = {
+  T: tempoTag, N: velTag, B: batObj.bateria || "B_absent",
+  C: batObj.carregando || "C_absent", Tema: tema, RAM: ram,
+  V: vib, Device: device, Conexao: conexao, Movimento: movimento,
+  Rede: redeTag, Placement: placementTag, Source: sourceTag,
+  Browser: browserTag, Hora: horaTag, State: stateTag, City: cityTag,
+  Min_Dezena: minDezena, Min_Unidade: minUnidade, Seg_Metade: segMetade,
+  Hora_Par: horaPar, DiaSemana: diaSemana, Dia_Par: diaPar, Periodo: periodo,
+  B_Par: bPar, N_Par: nPar, FBP: FBP, FBC: FBC
+}
+if(ENABLE_PARIDADE && paridadeTag) RUNTIME.Paridade = paridadeTag
+
+// Regras TOP vazias
+const REGRAS_TOP02 = []
+const REGRAS_TOP03 = []
+const REGRAS_TOP04 = []
+const REGRAS_TOP05 = []
+const REGRAS_TOP06 = []
+
+const matchTop = (regras) => regras.some(regra =>
+  Object.entries(regra).every(([p,v]) => RUNTIME[p] === v)
+)
+const bateuTop02 = matchTop(REGRAS_TOP02)
+const bateuTop03 = matchTop(REGRAS_TOP03)
+const bateuTop04 = matchTop(REGRAS_TOP04)
+const bateuTop05 = matchTop(REGRAS_TOP05)
+const bateuTop06 = matchTop(REGRAS_TOP06)
+
+if(bateuTop02) enviarEvento("TOP02")
+if(bateuTop03) enviarEvento("TOP03")
+if(bateuTop04) enviarEvento("TOP04")
+if(bateuTop05) enviarEvento("TOP05")
+if(bateuTop06) enviarEvento("TOP06")
+
+const topTag = bateuTop06?"F6":bateuTop05?"F5":bateuTop04?"F4":bateuTop03?"F3":bateuTop02?"F2":""
+
+// =========================================================
+// MONTAGEM DO UC FINAL (igual ao original)
+// =========================================================
+const idTag = "ID" + userId
+
+const corpoParts = [
+  baseUC,
+  tempoTag,
+  velTag,
+  batObj.bateria,
+  batObj.carregando,
+  tema,
+  ram,
+  vib,
+  device,
+  conexao,
+  movimento,
+  redeTag,
+  placementTag,
+  sourceTag,
+  stateTag,
+  cityTag
+]
+
+const corpo       = corpoParts.join("").replace(/[^a-zA-Z0-9]/g, "")
+const MAX         = 48
+const espacoCorpo = MAX - idTag.length - topTag.length
+const corpoFinal  = corpo.slice(0, espacoCorpo)
+const finalUC     = corpoFinal + topTag + idTag
+
+// =========================================================
+// DEBUG
+// =========================================================
+if(DEBUG){
+  alert(
+    "=== DEBUG UC ===\n" +
+    "stateTag:   [" + stateTag      + "] (" + geo.state_full + ")\n" +
+    "cityTag:    [" + cityTag       + "] (" + geo.city_full  + ")\n" +
+    "placement:  [" + placementTag  + "]\n" +
+    "source:     [" + sourceTag     + "]\n" +
+    "horaTag:    [" + horaTag       + "]\n" +
+    "topTag:     [" + topTag        + "]\n" +
+    "finalUC:    [" + finalUC       + "] (" + finalUC.length + " chars)\n" +
+    "userId:     [" + userId        + "]\n" +
+    "_fbp:       [" + fbpValue      + "]"
+  )
+}
+
+// =========================================================
+// GOOGLE SHEETS (mesmo método original: fetch no-cors, mas com keepalive)
+// =========================================================
+try {
+  const agora     = new Date()
+  const data_hora = agora.toLocaleString("pt-BR",{timeZone:"America/Sao_Paulo"})
+  const payload   = {
+    data_hora,
+    external_id : userId,
+    fbc         : fbcValue,
+    fbp         : fbpValue,
+    placement   : placementTag,
+    source      : sourceTag,
+    device,
+    conexao,
+    rede        : redeTag,
+    velocidade  : velTag,
+    state       : stateTag,
+    state_full  : geo.state_full,
+    city        : cityTag,
+    city_full   : geo.city_full,
+    uc_completo : finalUC,
+    min_dezena  : minDezena,
+    min_unidade : minUnidade,
+    seg_metade  : segMetade,
+    hora_par    : horaPar,
+    dia_semana  : diaSemana,
+    dia_par     : diaPar,
+    periodo,
+    b_par       : bPar,
+    n_par       : nPar,
+    fbp_flag    : FBP,
+    fbc_flag    : FBC
+  }
+  if(ENABLE_PARIDADE && paridadeTag) payload.paridade = paridadeTag
+  
+  // Usa fetch com no-cors e keepalive (igual ao original, mas com keepalive)
+  fetch(SHEETS_URL, {
+    method  : "POST",
+    mode    : "no-cors",
+    headers : { "Content-Type": "application/json" },
+    body    : JSON.stringify(payload),
+    keepalive: true  // importante para não ser abortado no redirect
+  }).catch(()=>{})
+} catch(e){}
+
+// =========================================================
+// REDIRECT (aumentei para 800ms para dar tempo do retry do _fbp)
+// =========================================================
+const url = `https://shopee-utm-tracker.onrender.com/?link=${encodeURIComponent(LINK)}&uc=${finalUC}`
+setTimeout(() => { window.location.href = url }, 800)
+
+})();
+</script>
+</body>
+</html>
