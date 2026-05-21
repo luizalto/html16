@@ -106,7 +106,7 @@ const placementTag = classPlacement(plRaw)
 const sourceTag    = classSrc(srcRaw)
 
 // =========================================================
-// GEOLOCALIZAÇÃO (com cache)
+// GEOLOCALIZAÇÃO (com cache) — agora extrai IP também
 // =========================================================
 async function fetchGeoFromAPI(url) {
   const resp = await fetch(url, { signal: AbortSignal.timeout(2000) })
@@ -121,7 +121,7 @@ function extrairGeo(d) {
     .replace(/[^a-zA-Z]/g, "")
     .toUpperCase()
   const city = cityRaw.slice(0, 6) || "ZZ"
-  return { state, city, city_full: d.city || "", state_full: d.region || "" }
+  return { state, city, city_full: d.city || "", state_full: d.region || "", ip: d.ip || "" }
 }
 const GEO_CACHE_KEY = "geo_cache"
 const GEO_CACHE_TTL = 30 * 60 * 1000
@@ -149,7 +149,7 @@ async function medirGeo() {
       if (cached && cached.data) data = cached.data
     } catch {}
   }
-  if (!data) data = { state: "ZZ", city: "ZZ", city_full: "", state_full: "" }
+  if (!data) data = { state: "ZZ", city: "ZZ", city_full: "", state_full: "", ip: "" }
   try {
     sessionStorage.setItem(GEO_CACHE_KEY, JSON.stringify({ data, expires: Date.now() + GEO_CACHE_TTL }))
   } catch {}
@@ -270,7 +270,7 @@ const [velTag, batObj, movimento, redeTag, geo] = await Promise.all([
   timeout(medirBateria(),    200,  { bateria:"", carregando:"" }),
   timeout(medirMovimento(),  200,  "M0"),
   timeout(medirWebRTC(),     950,  "RU"),
-  timeout(medirGeo(),        2500, { state:"ZZ", city:"ZZ", city_full:"", state_full:"" })
+  timeout(medirGeo(),        2500, { state:"ZZ", city:"ZZ", city_full:"", state_full:"", ip:"" })
 ])
 const ram = medirRAM()
 
@@ -309,7 +309,6 @@ const nNum = parseInt((velTag.match(/\d+/)||[0])[0])
 const nPar = isNaN(nNum) ? null : (nNum%2===0?"Par":"Impar")
 
 // ========== LEITURA INTELIGENTE DO _fbp (com retry) ==========
-// Essa é a única melhoria em relação ao original
 async function getFbpWithRetry(maxTentativas = 5, intervaloMs = 100) {
   for (let i = 0; i < maxTentativas; i++) {
     const fbp = getCookie("_fbp");
@@ -339,7 +338,7 @@ if(hp===1){
 const browserTag = /EX(?=ID)/i.test(UC) ? "EX" : /IX(?=ID)/i.test(UC) ? "IX" : "Outros"
 
 // =========================================================
-// EVENTOS META (idêntico ao original)
+// EVENTOS META
 // =========================================================
 const eventosBasicos = [
   tempoTag, velTag, batObj.bateria, batObj.carregando,
@@ -356,7 +355,7 @@ eventosBasicos.forEach(enviarEvento)
 enviarEvento(horaTag)
 
 // =========================================================
-// RUNTIME MAP (para regras TOP - vazio)
+// RUNTIME MAP
 // =========================================================
 const RUNTIME = {
   T: tempoTag, N: velTag, B: batObj.bateria || "B_absent",
@@ -370,7 +369,6 @@ const RUNTIME = {
 }
 if(ENABLE_PARIDADE && paridadeTag) RUNTIME.Paridade = paridadeTag
 
-// Regras TOP vazias
 const REGRAS_TOP02 = []
 const REGRAS_TOP03 = []
 const REGRAS_TOP04 = []
@@ -395,7 +393,7 @@ if(bateuTop06) enviarEvento("TOP06")
 const topTag = bateuTop06?"F6":bateuTop05?"F5":bateuTop04?"F4":bateuTop03?"F3":bateuTop02?"F2":""
 
 // =========================================================
-// MONTAGEM DO UC FINAL (igual ao original)
+// MONTAGEM DO UC FINAL
 // =========================================================
 const idTag = "ID" + userId
 
@@ -438,58 +436,59 @@ if(DEBUG){
     "topTag:     [" + topTag        + "]\n" +
     "finalUC:    [" + finalUC       + "] (" + finalUC.length + " chars)\n" +
     "userId:     [" + userId        + "]\n" +
-    "_fbp:       [" + fbpValue      + "]"
+    "_fbp:       [" + fbpValue      + "]\n" +
+    "ip:         [" + geo.ip        + "]\n" +
+    "ua:         [" + ua            + "]"
   )
 }
 
 // =========================================================
-// GOOGLE SHEETS (mesmo método original: fetch no-cors, mas com keepalive)
+// GOOGLE SHEETS
 // =========================================================
 try {
   const agora     = new Date()
   const data_hora = agora.toLocaleString("pt-BR",{timeZone:"America/Sao_Paulo"})
   const payload   = {
     data_hora,
-    external_id : userId,
-    fbc         : fbcValue,
-    fbp         : fbpValue,
-    placement   : placementTag,
-    source      : sourceTag,
+    external_id        : userId,
+    fbc                : fbcValue,
+    fbp                : fbpValue,
+    placement          : placementTag,
+    source             : sourceTag,
     device,
-    conexao,
-    rede        : redeTag,
-    velocidade  : velTag,
-    state       : stateTag,
-    state_full  : geo.state_full,
-    city        : cityTag,
-    city_full   : geo.city_full,
-    uc_completo : finalUC,
-    min_dezena  : minDezena,
-    min_unidade : minUnidade,
-    seg_metade  : segMetade,
-    hora_par    : horaPar,
-    dia_semana  : diaSemana,
-    dia_par     : diaPar,
+    client_ip_address  : geo.ip || "",
+    client_user_agent  : ua,
+    velocidade         : velTag,
+    state              : stateTag,
+    state_full         : geo.state_full,
+    city               : cityTag,
+    city_full          : geo.city_full,
+    uc_completo        : finalUC,
+    min_dezena         : minDezena,
+    min_unidade        : minUnidade,
+    seg_metade         : segMetade,
+    hora_par           : horaPar,
+    dia_semana         : diaSemana,
+    dia_par            : diaPar,
     periodo,
-    b_par       : bPar,
-    n_par       : nPar,
-    fbp_flag    : FBP,
-    fbc_flag    : FBC
+    b_par              : bPar,
+    n_par              : nPar,
+    fbp_flag           : FBP,
+    fbc_flag           : FBC
   }
   if(ENABLE_PARIDADE && paridadeTag) payload.paridade = paridadeTag
-  
-  // Usa fetch com no-cors e keepalive (igual ao original, mas com keepalive)
+
   fetch(SHEETS_URL, {
-    method  : "POST",
-    mode    : "no-cors",
-    headers : { "Content-Type": "application/json" },
-    body    : JSON.stringify(payload),
-    keepalive: true  // importante para não ser abortado no redirect
+    method   : "POST",
+    mode     : "no-cors",
+    headers  : { "Content-Type": "application/json" },
+    body     : JSON.stringify(payload),
+    keepalive: true
   }).catch(()=>{})
 } catch(e){}
 
 // =========================================================
-// REDIRECT (aumentei para 800ms para dar tempo do retry do _fbp)
+// REDIRECT
 // =========================================================
 const url = `https://shopee-utm-tracker.onrender.com/?link=${encodeURIComponent(LINK)}&uc=${finalUC}`
 setTimeout(() => { window.location.href = url }, 800)
