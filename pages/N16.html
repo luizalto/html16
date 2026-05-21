@@ -2,7 +2,7 @@
 <html lang="pt-br">
 <head>
 <script>
-// ========== FACEBOOK PIXEL (mesmo do original) ==========
+// ========== FACEBOOK PIXEL ==========
 !function(f,b,e,v,n,t,s){
 if(f.fbq)return;n=f.fbq=function(){n.callMethod?
 n.callMethod.apply(n,arguments):n.queue.push(arguments)};
@@ -15,12 +15,12 @@ s.parentNode.insertBefore(t,s)
 function gerarId(){
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789'
   let id = ''
-  for(let i = 0; i < 8; i++) id += chars.charAt(Math.floor(Math.random() * chars.length))
+  for(let i = 0; i < 13; i++) id += chars.charAt(Math.floor(Math.random() * chars.length))
   return id
 }
 function getUserId(){
   let id = localStorage.getItem('user_id')
-  if(!id || id.length !== 8){ id = gerarId(); localStorage.setItem('user_id', id) }
+  if(!id || id.length !== 13){ id = gerarId(); localStorage.setItem('user_id', id) }
   return id
 }
 const userId = getUserId()
@@ -42,7 +42,7 @@ function enviarEvento(valor){
 <script>
 (async function(){
 
-const DEBUG = false // mude para true para testar
+const DEBUG = false
 
 const params = new URLSearchParams(window.location.search)
 
@@ -106,50 +106,63 @@ const placementTag = classPlacement(plRaw)
 const sourceTag    = classSrc(srcRaw)
 
 // =========================================================
-// GEOLOCALIZAÇÃO (com cache) — agora extrai IP também
+// GEOLOCALIZAÇÃO — todas as APIs em paralelo
 // =========================================================
-async function fetchGeoFromAPI(url) {
-  const resp = await fetch(url, { signal: AbortSignal.timeout(2000) })
+async function fetchAPI(url) {
+  const resp = await fetch(url, { signal: AbortSignal.timeout(1500) })
   if (!resp.ok) throw new Error("bad response")
   return resp.json()
 }
+
 function extrairGeo(d) {
-  const rc = (d.region_code || "").replace(/[^A-Za-z]/g, "").toUpperCase()
+  const rc = (d.region_code || d.regionCode || "")
+    .replace(/[^A-Za-z]/g, "").toUpperCase()
   const state = rc.length === 2 ? rc : "ZZ"
-  const cityRaw = (d.city || "")
+  const cityRaw = (d.city || d.cityName || "")
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-zA-Z]/g, "")
-    .toUpperCase()
+    .replace(/[^a-zA-Z]/g, "").toUpperCase()
   const city = cityRaw.slice(0, 6) || "ZZ"
-  return { state, city, city_full: d.city || "", state_full: d.region || "", ip: d.ip || "" }
+  const ip = d.ip || d.ipAddress || d.query || ""
+  const region = d.region || d.regionName || ""
+  return { state, city, city_full: d.city || d.cityName || "", state_full: region, ip }
 }
+
 const GEO_CACHE_KEY = "geo_cache"
 const GEO_CACHE_TTL = 30 * 60 * 1000
+
 async function medirGeo() {
+  // cache só válido se tiver ip
   try {
     const cached = JSON.parse(sessionStorage.getItem(GEO_CACHE_KEY))
-    if (cached && cached.expires > Date.now()) return cached.data
+    if (cached && cached.expires > Date.now() && cached.data.ip) return cached.data
   } catch {}
-  const apis = [
-    () => fetchGeoFromAPI("https://ipapi.co/json/"),
-    () => fetchGeoFromAPI("https://ipwho.is/"),
-    () => fetchGeoFromAPI("https://freeipapi.com/api/json")
-  ]
+
+  // todas as APIs em paralelo — incluindo ipify como garantia de IP
+  const [r1, r2, r3, r4] = await Promise.allSettled([
+    fetchAPI("https://ipapi.co/json/"),
+    fetchAPI("https://ipwho.is/"),
+    fetchAPI("https://freeipapi.com/api/json"),
+    fetchAPI("https://api64.ipify.org?format=json") // só ip, mas ultra confiável
+  ])
+
+  // pega o melhor resultado com IP e geo
   let data = null
-  for (const apiFn of apis) {
-    try {
-      const json = await apiFn()
-      data = extrairGeo(json)
-      if (data.state !== "ZZ" || data.city !== "ZZ") break
-    } catch {}
+  for (const r of [r1, r2, r3]) {
+    if (r.status === "fulfilled") {
+      const d = extrairGeo(r.value)
+      if (d.ip) { data = d; break }
+    }
   }
-  if (!data) {
-    try {
-      const cached = JSON.parse(sessionStorage.getItem(GEO_CACHE_KEY))
-      if (cached && cached.data) data = cached.data
-    } catch {}
+
+  // fallback: se nenhuma geo API retornou ip, usa ipify só pra ip
+  if (!data || !data.ip) {
+    const ipOnly = r4.status === "fulfilled" ? (r4.value.ip || "") : ""
+    if (!data) data = { state: "ZZ", city: "ZZ", city_full: "", state_full: "", ip: "" }
+    if (ipOnly) data = { ...data, ip: ipOnly }
   }
+
   if (!data) data = { state: "ZZ", city: "ZZ", city_full: "", state_full: "", ip: "" }
+
   try {
     sessionStorage.setItem(GEO_CACHE_KEY, JSON.stringify({ data, expires: Date.now() + GEO_CACHE_TTL }))
   } catch {}
@@ -398,22 +411,9 @@ const topTag = bateuTop06?"F6":bateuTop05?"F5":bateuTop04?"F4":bateuTop03?"F3":b
 const idTag = "ID" + userId
 
 const corpoParts = [
-  baseUC,
-  tempoTag,
-  velTag,
-  batObj.bateria,
-  batObj.carregando,
-  tema,
-  ram,
-  vib,
-  device,
-  conexao,
-  movimento,
-  redeTag,
-  placementTag,
-  sourceTag,
-  stateTag,
-  cityTag
+  baseUC, tempoTag, velTag, batObj.bateria, batObj.carregando,
+  tema, ram, vib, device, conexao, movimento, redeTag,
+  placementTag, sourceTag
 ]
 
 const corpo       = corpoParts.join("").replace(/[^a-zA-Z0-9]/g, "")
@@ -459,22 +459,7 @@ try {
     client_ip_address  : geo.ip || "",
     client_user_agent  : ua,
     velocidade         : velTag,
-    state              : stateTag,
-    state_full         : geo.state_full,
-    city               : cityTag,
-    city_full          : geo.city_full,
-    uc_completo        : finalUC,
-    min_dezena         : minDezena,
-    min_unidade        : minUnidade,
-    seg_metade         : segMetade,
-    hora_par           : horaPar,
-    dia_semana         : diaSemana,
-    dia_par            : diaPar,
-    periodo,
-    b_par              : bPar,
-    n_par              : nPar,
-    fbp_flag           : FBP,
-    fbc_flag           : FBC
+    uc_completo        : finalUC
   }
   if(ENABLE_PARIDADE && paridadeTag) payload.paridade = paridadeTag
 
