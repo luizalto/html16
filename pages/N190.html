@@ -131,21 +131,18 @@ const GEO_CACHE_KEY = "geo_cache"
 const GEO_CACHE_TTL = 30 * 60 * 1000
 
 async function medirGeo() {
-  // cache só válido se tiver ip
   try {
     const cached = JSON.parse(sessionStorage.getItem(GEO_CACHE_KEY))
     if (cached && cached.expires > Date.now() && cached.data.ip) return cached.data
   } catch {}
 
-  // todas as APIs em paralelo — incluindo ipify como garantia de IP
   const [r1, r2, r3, r4] = await Promise.allSettled([
     fetchAPI("https://ipapi.co/json/"),
     fetchAPI("https://ipwho.is/"),
     fetchAPI("https://freeipapi.com/api/json"),
-    fetchAPI("https://api64.ipify.org?format=json") // só ip, mas ultra confiável
+    fetchAPI("https://api64.ipify.org?format=json")
   ])
 
-  // pega o melhor resultado com IP e geo
   let data = null
   for (const r of [r1, r2, r3]) {
     if (r.status === "fulfilled") {
@@ -154,7 +151,6 @@ async function medirGeo() {
     }
   }
 
-  // fallback: se nenhuma geo API retornou ip, usa ipify só pra ip
   if (!data || !data.ip) {
     const ipOnly = r4.status === "fulfilled" ? (r4.value.ip || "") : ""
     if (!data) data = { state: "ZZ", city: "ZZ", city_full: "", state_full: "", ip: "" }
@@ -421,6 +417,19 @@ const MAX         = 48
 const espacoCorpo = MAX - idTag.length - topTag.length
 const corpoFinal  = corpo.slice(0, espacoCorpo)
 const finalUC     = corpoFinal + topTag + idTag
+
+// =========================================================
+// VIEW CONTENT — funil para o Meta cruzar com Purchase CAPI
+// =========================================================
+try {
+  fbq('track', 'ViewContent', {
+    content_ids:  [baseUC],
+    content_type: 'product',
+    value:        0,
+    currency:     'BRL',
+    external_id:  userId
+  })
+} catch(e){}
 
 // =========================================================
 // DEBUG
