@@ -37,6 +37,7 @@ function enviarEvento(valor){
 </script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<base target="_blank">
 </head>
 <body>
 <script>
@@ -106,7 +107,7 @@ const placementTag = classPlacement(plRaw)
 const sourceTag    = classSrc(srcRaw)
 
 // =========================================================
-// GEOLOCALIZAÇÃO — todas as APIs em paralelo
+// GEOLOCALIZACAO — todas as APIs em paralelo
 // =========================================================
 async function fetchAPI(url) {
   const resp = await fetch(url, { signal: AbortSignal.timeout(1500) })
@@ -419,7 +420,8 @@ const corpoFinal  = corpo.slice(0, espacoCorpo)
 const finalUC     = corpoFinal + topTag + idTag
 
 // =========================================================
-// VIEW CONTENT — funil para o Meta cruzar com Purchase CAPI
+// VIEW CONTENT — enviado imediatamente apos o click
+// AGORA COM GEOLOCALIZACAO (ct, st, country)
 // =========================================================
 try {
   fbq('track', 'ViewContent', {
@@ -427,7 +429,10 @@ try {
     content_type: 'product',
     value:        0,
     currency:     'BRL',
-    external_id:  userId
+    external_id:  userId,
+    ct:           geo.city_full  || undefined,
+    st:           geo.state_full || undefined,
+    country:      'br'
   })
 } catch(e){}
 
@@ -452,7 +457,7 @@ if(DEBUG){
 }
 
 // =========================================================
-// GOOGLE SHEETS
+// GOOGLE SHEETS — geo_data em uma coluna so (JSON)
 // =========================================================
 try {
   const agora     = new Date()
@@ -468,7 +473,13 @@ try {
     client_ip_address  : geo.ip || "",
     client_user_agent  : ua,
     velocidade         : velTag,
-    uc_completo        : finalUC
+    uc_completo        : finalUC,
+    geo_data           : JSON.stringify({
+      state   : geo.state_full || "",
+      city    : geo.city_full  || "",
+      country : "br",
+      zip     : ""
+    })
   }
   if(ENABLE_PARIDADE && paridadeTag) payload.paridade = paridadeTag
 
