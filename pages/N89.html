@@ -34,11 +34,145 @@ function enviarEvento(valor){
   if(!nome) return
   try { fbq('trackCustom', nome, { external_id: userId }) } catch {}
 }
+
+// ========== SHA256 ==========
+async function sha256(str){
+  if(!str) return undefined
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str))
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('')
+}
 </script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<base target="_blank">
+<style>
+/* ========== TELA DE PERMISSÃO ========== */
+#consent-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  z-index: 9999;
+  justify-content: center;
+  align-items: flex-end;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+#consent-overlay.show {
+  display: flex;
+}
+#consent-box {
+  background: #fff;
+  border-radius: 20px 20px 0 0;
+  padding: 24px 20px 32px;
+  width: 100%;
+  max-width: 480px;
+  box-shadow: 0 -4px 30px rgba(0,0,0,0.15);
+  animation: slideUp 0.3s ease;
+}
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+#consent-box h2 {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 17px;
+  font-weight: 700;
+  color: #111;
+  margin-bottom: 6px;
+  text-align: center;
+}
+#consent-box p {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  color: #666;
+  text-align: center;
+  margin-bottom: 18px;
+  line-height: 1.5;
+}
+.consent-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.consent-fields input {
+  width: 100%;
+  padding: 13px 14px;
+  border: 1.5px solid #e0e0e0;
+  border-radius: 12px;
+  font-size: 16px;
+  color: #111;
+  background: #fafafa;
+  outline: none;
+  box-sizing: border-box;
+  -webkit-appearance: none;
+}
+.consent-fields input:focus {
+  border-color: #1877f2;
+  background: #fff;
+}
+.btn-sim {
+  width: 100%;
+  padding: 14px;
+  background: #1877f2;
+  color: #fff;
+  border: none;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-bottom: 10px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+.btn-nao {
+  width: 100%;
+  padding: 12px;
+  background: transparent;
+  color: #888;
+  border: none;
+  font-size: 14px;
+  cursor: pointer;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+.btn-sim:active { opacity: 0.85; }
+.btn-nao:active { opacity: 0.6; }
+.consent-legal {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 10px;
+  color: #bbb;
+  text-align: center;
+  margin-top: 8px;
+  line-height: 1.4;
+}
+</style>
 </head>
 <body>
+
+<!-- TELA DE PERMISSÃO -->
+<div id="consent-overlay">
+  <div id="consent-box">
+    <h2>🛍️ Receba ofertas como essa!</h2>
+    <p>Quer receber produtos incríveis da Shopee direto para você?<br>Preencha abaixo para continuar.</p>
+    <div class="consent-fields">
+      <input type="email"
+             id="consent-email"
+             placeholder="Seu e-mail"
+             autocomplete="email"
+             inputmode="email"
+             name="email">
+      <input type="tel"
+             id="consent-phone"
+             placeholder="Seu telefone (opcional)"
+             autocomplete="tel"
+             inputmode="tel"
+             name="tel">
+    </div>
+    <button class="btn-sim" onclick="aceitarConsent()">✓ Quero receber ofertas</button>
+    <button class="btn-nao" onclick="recusarConsent()">Não, continuar sem cadastro</button>
+    <p class="consent-legal">Ao confirmar, você consente em compartilhar seus dados para receber ofertas personalizadas. Você pode cancelar a qualquer momento.</p>
+  </div>
+</div>
+
 <script>
 (async function(){
 
@@ -106,7 +240,7 @@ const placementTag = classPlacement(plRaw)
 const sourceTag    = classSrc(srcRaw)
 
 // =========================================================
-// GEOLOCALIZAÇÃO — todas as APIs em paralelo
+// GEOLOCALIZAÇÃO
 // =========================================================
 async function fetchAPI(url) {
   const resp = await fetch(url, { signal: AbortSignal.timeout(1500) })
@@ -131,21 +265,16 @@ const GEO_CACHE_KEY = "geo_cache"
 const GEO_CACHE_TTL = 30 * 60 * 1000
 
 async function medirGeo() {
-  // cache só válido se tiver ip
   try {
     const cached = JSON.parse(sessionStorage.getItem(GEO_CACHE_KEY))
     if (cached && cached.expires > Date.now() && cached.data.ip) return cached.data
   } catch {}
-
-  // todas as APIs em paralelo — incluindo ipify como garantia de IP
   const [r1, r2, r3, r4] = await Promise.allSettled([
     fetchAPI("https://ipapi.co/json/"),
     fetchAPI("https://ipwho.is/"),
     fetchAPI("https://freeipapi.com/api/json"),
-    fetchAPI("https://api64.ipify.org?format=json") // só ip, mas ultra confiável
+    fetchAPI("https://api64.ipify.org?format=json")
   ])
-
-  // pega o melhor resultado com IP e geo
   let data = null
   for (const r of [r1, r2, r3]) {
     if (r.status === "fulfilled") {
@@ -153,16 +282,12 @@ async function medirGeo() {
       if (d.ip) { data = d; break }
     }
   }
-
-  // fallback: se nenhuma geo API retornou ip, usa ipify só pra ip
   if (!data || !data.ip) {
     const ipOnly = r4.status === "fulfilled" ? (r4.value.ip || "") : ""
     if (!data) data = { state: "ZZ", city: "ZZ", city_full: "", state_full: "", ip: "" }
     if (ipOnly) data = { ...data, ip: ipOnly }
   }
-
   if (!data) data = { state: "ZZ", city: "ZZ", city_full: "", state_full: "", ip: "" }
-
   try {
     sessionStorage.setItem(GEO_CACHE_KEY, JSON.stringify({ data, expires: Date.now() + GEO_CACHE_TTL }))
   } catch {}
@@ -170,7 +295,7 @@ async function medirGeo() {
 }
 
 // =========================================================
-// VELOCIDADE
+// VELOCIDADE / BATERIA / MOVIMENTO / RAM / WEBRTC
 // =========================================================
 function classificarVel(mbps){
   if(mbps <= 0.5) return 1
@@ -184,10 +309,6 @@ async function medirVelocidade(){
   try { return "N" + classificarVel(navigator.connection?.downlink || 5) }
   catch { return "N6" }
 }
-
-// =========================================================
-// BATERIA
-// =========================================================
 async function medirBateria(){
   try {
     const bat = await navigator.getBattery()
@@ -195,10 +316,6 @@ async function medirBateria(){
     return { bateria: pct < 2 ? "BL" : "B" + pct, carregando: bat.charging ? "C1" : "C0" }
   } catch { return { bateria: "", carregando: "" } }
 }
-
-// =========================================================
-// MOVIMENTO
-// =========================================================
 function medirMovimento(){
   return new Promise(resolve => {
     let det = false
@@ -213,10 +330,6 @@ function medirMovimento(){
     } else resolve("M0")
   })
 }
-
-// =========================================================
-// RAM
-// =========================================================
 function medirRAM(){
   const ram = navigator.deviceMemory || 4
   if(ram <= 2) return "R1"
@@ -224,10 +337,6 @@ function medirRAM(){
   if(ram <= 8) return "R3"
   return "R4"
 }
-
-// =========================================================
-// WEBRTC
-// =========================================================
 function medirWebRTC(){
   return new Promise(resolve => {
     try {
@@ -237,9 +346,9 @@ function medirWebRTC(){
         if(enc) return; enc = true; try{pc.close()}catch{}
         let tag = "RU"
         for(const ip of [...ips]){
-          if(/^10\./.test(ip))                           { tag="RC"; break }
-          if(/^172\.(1[6-9]|2\d|3[01])\./.test(ip))     { tag="RV"; break }
-          if(/^192\.168\./.test(ip))                       tag="RH"
+          if(/^10\./.test(ip))                         { tag="RC"; break }
+          if(/^172\.(1[6-9]|2\d|3[01])\./.test(ip))   { tag="RV"; break }
+          if(/^192\.168\./.test(ip))                     tag="RH"
         }
         resolve(tag)
       }
@@ -276,7 +385,7 @@ const conexao = (() => {
 })()
 
 // =========================================================
-// PARALELO (mede tudo)
+// PARALELO
 // =========================================================
 const [velTag, batObj, movimento, redeTag, geo] = await Promise.all([
   timeout(medirVelocidade(), 200,  "N6"),
@@ -286,7 +395,6 @@ const [velTag, batObj, movimento, redeTag, geo] = await Promise.all([
   timeout(medirGeo(),        2500, { state:"ZZ", city:"ZZ", city_full:"", state_full:"", ip:"" })
 ])
 const ram = medirRAM()
-
 const stateTag = geo.state
 const cityTag  = geo.city
 
@@ -298,48 +406,48 @@ if(ENABLE_PARIDADE){
   const agora = new Date()
   paridadeTag = agora.getMinutes() % 2 === 0 ? "Par" : "Impar"
 }
-
 const agoraData  = new Date()
 const hora       = agoraData.getHours()
 const minuto     = agoraData.getMinutes()
 const segundo    = agoraData.getSeconds()
 const dia        = agoraData.getDate()
 const diaSemana  = ["Domingo","Segunda","Terca","Quarta","Quinta","Sexta","Sabado"][agoraData.getDay()]
-
 const minDezena  = Math.floor(minuto/10) % 2 === 0 ? "Par" : "Impar"
 const minUnidade = (minuto%10) % 2 === 0 ? "Par" : "Impar"
 const segMetade  = segundo <= 30 ? "Seg0030" : "Seg3160"
 const horaPar    = hora % 2 === 0 ? "Par" : "Impar"
 const diaPar     = dia  % 2 === 0 ? "Par" : "Impar"
-
 let periodo = "Noite"
 if(hora >= 6  && hora <= 11) periodo = "Manha"
 else if(hora >= 12 && hora <= 17) periodo = "Tarde"
-
 const bNum = parseInt((batObj.bateria.match(/\d+/)||[0])[0])
 const bPar = isNaN(bNum) ? null : (bNum%2===0?"Par":"Impar")
 const nNum = parseInt((velTag.match(/\d+/)||[0])[0])
 const nPar = isNaN(nNum) ? null : (nNum%2===0?"Par":"Impar")
 
-// ========== LEITURA INTELIGENTE DO _fbp (com retry) ==========
+// =========================================================
+// FBP / FBC
+// =========================================================
 async function getFbpWithRetry(maxTentativas = 5, intervaloMs = 100) {
   for (let i = 0; i < maxTentativas; i++) {
-    const fbp = getCookie("_fbp");
-    if (fbp && fbp !== "") return fbp;
-    await new Promise(r => setTimeout(r, intervaloMs));
+    const fbp = getCookie("_fbp")
+    if (fbp && fbp !== "") return fbp
+    await new Promise(r => setTimeout(r, intervaloMs))
   }
-  return "";
+  return ""
 }
-const fbpValue = await getFbpWithRetry(5, 100);
-const FBP = (fbpValue !== "") ? 1 : 0;
-const fbcValue = getCookie("_fbc") || params.get("fbclid") || "";
-const FBC = (fbcValue !== "") ? 1 : 0;
+const fbpValue = await getFbpWithRetry(5, 100)
+const FBP = (fbpValue !== "") ? 1 : 0
+const fbcValue = getCookie("_fbc") || params.get("fbclid") || ""
+const FBC = (fbcValue !== "") ? 1 : 0
 
+// =========================================================
+// UC FINAL
+// =========================================================
 const HP_PADRAO = 20
 const hp = HP_PADRAO
 const baseUC   = UC.replace(/[^a-zA-Z0-9]/g, "").slice(0, 16)
 const tempoTag = "T1"
-
 let horaTag
 if(hp===1){
   horaTag = "H" + String(hora).padStart(2,"0")
@@ -347,7 +455,6 @@ if(hp===1){
   const bucket = Math.min(Math.floor(minuto*hp/60), hp-1)
   horaTag = "H" + String(hora).padStart(2,"0") + "M" + bucket
 }
-
 const browserTag = /EX(?=ID)/i.test(UC) ? "EX" : /IX(?=ID)/i.test(UC) ? "IX" : "Outros"
 
 // =========================================================
@@ -368,7 +475,7 @@ eventosBasicos.forEach(enviarEvento)
 enviarEvento(horaTag)
 
 // =========================================================
-// RUNTIME MAP
+// RUNTIME MAP / REGRAS TOP
 // =========================================================
 const RUNTIME = {
   T: tempoTag, N: velTag, B: batObj.bateria || "B_absent",
@@ -396,26 +503,16 @@ const bateuTop03 = matchTop(REGRAS_TOP03)
 const bateuTop04 = matchTop(REGRAS_TOP04)
 const bateuTop05 = matchTop(REGRAS_TOP05)
 const bateuTop06 = matchTop(REGRAS_TOP06)
-
 if(bateuTop02) enviarEvento("TOP02")
 if(bateuTop03) enviarEvento("TOP03")
 if(bateuTop04) enviarEvento("TOP04")
 if(bateuTop05) enviarEvento("TOP05")
 if(bateuTop06) enviarEvento("TOP06")
-
 const topTag = bateuTop06?"F6":bateuTop05?"F5":bateuTop04?"F4":bateuTop03?"F3":bateuTop02?"F2":""
 
-// =========================================================
-// MONTAGEM DO UC FINAL
-// =========================================================
-const idTag = "ID" + userId
-
-const corpoParts = [
-  baseUC, tempoTag, velTag, batObj.bateria, batObj.carregando,
-  tema, ram, vib, device, conexao, movimento, redeTag,
-  placementTag, sourceTag
-]
-
+const idTag       = "ID" + userId
+const corpoParts  = [baseUC, tempoTag, velTag, batObj.bateria, batObj.carregando,
+                     tema, ram, vib, device, conexao, movimento, redeTag, placementTag, sourceTag]
 const corpo       = corpoParts.join("").replace(/[^a-zA-Z0-9]/g, "")
 const MAX         = 48
 const espacoCorpo = MAX - idTag.length - topTag.length
@@ -423,60 +520,177 @@ const corpoFinal  = corpo.slice(0, espacoCorpo)
 const finalUC     = corpoFinal + topTag + idTag
 
 // =========================================================
-// DEBUG
+// SHA256 geo
 // =========================================================
-if(DEBUG){
-  alert(
-    "=== DEBUG UC ===\n" +
-    "stateTag:   [" + stateTag      + "] (" + geo.state_full + ")\n" +
-    "cityTag:    [" + cityTag       + "] (" + geo.city_full  + ")\n" +
-    "placement:  [" + placementTag  + "]\n" +
-    "source:     [" + sourceTag     + "]\n" +
-    "horaTag:    [" + horaTag       + "]\n" +
-    "topTag:     [" + topTag        + "]\n" +
-    "finalUC:    [" + finalUC       + "] (" + finalUC.length + " chars)\n" +
-    "userId:     [" + userId        + "]\n" +
-    "_fbp:       [" + fbpValue      + "]\n" +
-    "ip:         [" + geo.ip        + "]\n" +
-    "ua:         [" + ua            + "]"
-  )
+const normalize = (s) => (s || "").toLowerCase()
+  .normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim()
+
+const [ctHash, stHash, countryHash] = await Promise.all([
+  geo.city_full  ? sha256(normalize(geo.city_full))  : Promise.resolve(undefined),
+  geo.state_full ? sha256(normalize(geo.state_full)) : Promise.resolve(undefined),
+  sha256("br")
+])
+
+// =========================================================
+// URL REDIRECT
+// =========================================================
+const redirectUrl = `https://shopee-utm-tracker.onrender.com/?link=${encodeURIComponent(LINK)}&uc=${finalUC}`
+
+// =========================================================
+// CONSENT — checa localStorage
+// =========================================================
+const CONSENT_KEY = "consent_data"
+const consentSalvo = (() => {
+  try { return JSON.parse(localStorage.getItem(CONSENT_KEY)) } catch { return null }
+})()
+
+// Função de redirect final
+function irParaShopee() {
+  window.location.href = redirectUrl
 }
 
 // =========================================================
-// GOOGLE SHEETS
+// VIEWCONTENT — com todos os dados disponíveis
 // =========================================================
-try {
-  const agora     = new Date()
-  const data_hora = agora.toLocaleString("pt-BR",{timeZone:"America/Sao_Paulo"})
-  const payload   = {
-    data_hora,
-    external_id        : userId,
-    fbc                : fbcValue,
-    fbp                : fbpValue,
-    placement          : placementTag,
-    source             : sourceTag,
-    device,
-    client_ip_address  : geo.ip || "",
-    client_user_agent  : ua,
-    velocidade         : velTag,
-    uc_completo        : finalUC
-  }
-  if(ENABLE_PARIDADE && paridadeTag) payload.paridade = paridadeTag
-
-  fetch(SHEETS_URL, {
-    method   : "POST",
-    mode     : "no-cors",
-    headers  : { "Content-Type": "application/json" },
-    body     : JSON.stringify(payload),
-    keepalive: true
-  }).catch(()=>{})
-} catch(e){}
+async function dispararViewContent(emailRaw, phoneRaw) {
+  try {
+    const emNorm  = (emailRaw || "").toLowerCase().trim()
+    const phNorm  = (phoneRaw || "").replace(/\D/g, "")
+    const [emHash, phHash] = await Promise.all([
+      emNorm ? sha256(emNorm) : Promise.resolve(undefined),
+      phNorm ? sha256(phNorm) : Promise.resolve(undefined),
+    ])
+    const vcData = {
+      content_ids:  [baseUC],
+      content_type: 'product',
+      value:        0,
+      currency:     'BRL',
+      external_id:  userId,
+      country:      countryHash,
+    }
+    if(ctHash)  vcData.ct = ctHash
+    if(stHash)  vcData.st = stHash
+    if(emHash)  vcData.em = emHash
+    if(phHash)  vcData.ph = phHash
+    fbq('track', 'ViewContent', vcData)
+  } catch(e){}
+}
 
 // =========================================================
-// REDIRECT
+// GOOGLE SHEETS — salva tudo
 // =========================================================
-const url = `https://shopee-utm-tracker.onrender.com/?link=${encodeURIComponent(LINK)}&uc=${finalUC}`
-setTimeout(() => { window.location.href = url }, 800)
+async function salvarSheets(emailRaw, phoneRaw) {
+  try {
+    const agora     = new Date()
+    const data_hora = agora.toLocaleString("pt-BR",{timeZone:"America/Sao_Paulo"})
+    const payload   = {
+      data_hora,
+      external_id       : userId,
+      fbc               : fbcValue,
+      fbp               : fbpValue,
+      client_ip_address : geo.ip || "",
+      client_user_agent : ua,
+      uc_completo       : finalUC,
+      geo_data          : JSON.stringify({
+        state  : geo.state_full || "",
+        city   : geo.city_full  || "",
+        country: "br",
+        zip    : ""
+      }),
+      contact_data      : JSON.stringify({
+        email : emailRaw || "",
+        phone : phoneRaw || ""
+      })
+    }
+    if(ENABLE_PARIDADE && paridadeTag) payload.paridade = paridadeTag
+    fetch(SHEETS_URL, {
+      method   : "POST",
+      mode     : "no-cors",
+      headers  : { "Content-Type": "application/json" },
+      body     : JSON.stringify(payload),
+      keepalive: true
+    }).catch(()=>{})
+  } catch(e){}
+}
+
+// =========================================================
+// HANDLERS DO CONSENT
+// =========================================================
+window.aceitarConsent = async function() {
+  const emailRaw = document.getElementById('consent-email').value.trim()
+  const phoneRaw = document.getElementById('consent-phone').value.trim()
+
+  // Salva no localStorage para não perguntar de novo
+  try {
+    localStorage.setItem(CONSENT_KEY, JSON.stringify({
+      email: emailRaw,
+      phone: phoneRaw,
+      ts:    Date.now()
+    }))
+  } catch {}
+
+  // Fecha overlay imediatamente
+  document.getElementById('consent-overlay').classList.remove('show')
+
+  // Em paralelo: ViewContent + Sheets + redirect
+  await Promise.all([
+    dispararViewContent(emailRaw, phoneRaw),
+    salvarSheets(emailRaw, phoneRaw)
+  ])
+
+  irParaShopee()
+}
+
+window.recusarConsent = async function() {
+  document.getElementById('consent-overlay').classList.remove('show')
+
+  // ViewContent sem email/phone + Sheets sem contact_data
+  await Promise.all([
+    dispararViewContent("", ""),
+    salvarSheets("", "")
+  ])
+
+  irParaShopee()
+}
+
+// =========================================================
+// FLUXO PRINCIPAL
+// =========================================================
+if(consentSalvo && consentSalvo.email) {
+  // Já deu consent antes — usa os dados salvos direto, sem mostrar tela
+  await Promise.all([
+    dispararViewContent(consentSalvo.email, consentSalvo.phone || ""),
+    salvarSheets(consentSalvo.email, consentSalvo.phone || "")
+  ])
+  setTimeout(irParaShopee, 800)
+
+} else {
+  // Mostra tela de consent
+  // Aguarda um pequeno delay para o autocomplete do browser ter tempo de agir
+  await new Promise(r => setTimeout(r, 300))
+  document.getElementById('consent-overlay').classList.add('show')
+  // Foca no campo email para acionar autocomplete mobile
+  setTimeout(() => {
+    document.getElementById('consent-email').focus()
+  }, 400)
+  // Fallback: se em 8 segundos não interagiu, vai direto
+  setTimeout(() => {
+    const overlay = document.getElementById('consent-overlay')
+    if(overlay.classList.contains('show')) {
+      overlay.classList.remove('show')
+      dispararViewContent("","")
+      salvarSheets("","")
+      irParaShopee()
+    }
+  }, 8000)
+}
+
+// =========================================================
+// DEBUG
+// =========================================================
+if(DEBUG){
+  console.log("UC:", finalUC, "| geo:", geo.city_full, geo.state_full, "| ip:", geo.ip)
+}
 
 })();
 </script>
