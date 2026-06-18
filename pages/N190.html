@@ -117,22 +117,34 @@ const sourceTag    = classSrc(srcRaw)
 // GEOLOCALIZAÇÃO — todas as APIs em paralelo
 // =========================================================
 async function fetchAPI(url) {
-  const resp = await fetch(url, { signal: AbortSignal.timeout(1500) })
+  const resp = await fetch(url, { signal: AbortSignal.timeout(1200) })
   if (!resp.ok) throw new Error("bad response")
   return resp.json()
 }
 
 function extrairGeo(d) {
-  const rc = (d.region_code || d.regionCode || "")
+  // ip-api.com usa: d.region = código 2 letras, d.regionName = nome completo
+  // ipapi.co/ipwho.is: d.region_code = código, d.region = nome completo
+  // freeipapi.com: d.regionCode = código, d.regionName = nome completo
+  const rcExplicito = (d.region_code || d.regionCode || "")
     .replace(/[^A-Za-z]/g, "").toUpperCase()
+  const rcImplicito = (d.region && d.region.length <= 3)
+    ? d.region.replace(/[^A-Za-z]/g, "").toUpperCase()
+    : ""
+  const rc = rcExplicito.length === 2 ? rcExplicito : rcImplicito
   const state = rc.length === 2 ? rc : "ZZ"
+
   const cityRaw = (d.city || d.cityName || "")
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-zA-Z]/g, "").toUpperCase()
   const city = cityRaw.slice(0, 6) || "ZZ"
   const ip = d.ip || d.ipAddress || d.query || ""
-  const region = d.region || d.regionName || ""
-  return { state, city, city_full: d.city || d.cityName || "", state_full: region, ip }
+
+  // state_full: preferir nome completo; evitar usar o código de 2 letras como nome
+  const regionFull = d.regionName
+    || (d.region && d.region.length > 3 ? d.region : "")
+    || d.region_name || ""
+  return { state, city, city_full: d.city || d.cityName || "", state_full: regionFull, ip }
 }
 
 const GEO_CACHE_KEY = "geo_cache"
@@ -144,25 +156,34 @@ async function medirGeo() {
     if (cached && cached.expires > Date.now() && cached.data.ip) return cached.data
   } catch {}
 
-  const [r1, r2, r3, r4] = await Promise.allSettled([
+  // ip-api.com primeiro: melhor cobertura IPv6 Brasil, gratuita, sem auth
+  const [r1, r2, r3, r4, r5] = await Promise.allSettled([
+    fetchAPI("https://ip-api.com/json/?fields=status,regionName,city,country,query,region"),
     fetchAPI("https://ipapi.co/json/"),
     fetchAPI("https://ipwho.is/"),
     fetchAPI("https://freeipapi.com/api/json"),
     fetchAPI("https://api64.ipify.org?format=json")
   ])
 
+  // Prioridade: primeiro resultado com IP + city ou state preenchidos
   let data = null
-  for (const r of [r1, r2, r3]) {
+  let dataIpOnly = null  // fallback: tem IP mas sem geo
+  for (const r of [r1, r2, r3, r4]) {
     if (r.status === "fulfilled") {
+      if (r.value.status === "fail") continue  // ip-api.com retorna isso em falha
       const d = extrairGeo(r.value)
-      if (d.ip) { data = d; break }
+      if (d.ip && (d.city_full || d.state_full)) { data = d; break }
+      if (d.ip && !dataIpOnly) dataIpOnly = d  // guarda IP-only como fallback
     }
   }
 
-  if (!data || !data.ip) {
-    const ipOnly = r4.status === "fulfilled" ? (r4.value.ip || "") : ""
-    if (!data) data = { state: "ZZ", city: "ZZ", city_full: "", state_full: "", ip: "" }
-    if (ipOnly) data = { ...data, ip: ipOnly }
+  if (!data) {
+    const ipFallback = r5.status === "fulfilled" ? (r5.value.ip || "") : ""
+    if (!dataIpOnly) {
+      data = { state: "ZZ", city: "ZZ", city_full: "", state_full: "", ip: ipFallback }
+    } else {
+      data = ipFallback ? { ...dataIpOnly, ip: ipFallback } : dataIpOnly
+    }
   }
 
   if (!data) data = { state: "ZZ", city: "ZZ", city_full: "", state_full: "", ip: "" }
@@ -287,7 +308,7 @@ const [velTag, batObj, movimento, redeTag, geo] = await Promise.all([
   timeout(medirBateria(),    200,  { bateria:"", carregando:"" }),
   timeout(medirMovimento(),  200,  "M0"),
   timeout(medirWebRTC(),     950,  "RU"),
-  timeout(medirGeo(),        2500, { state:"ZZ", city:"ZZ", city_full:"", state_full:"", ip:"" })
+  timeout(medirGeo(),       2000, { state:"ZZ", city:"ZZ", city_full:"", state_full:"", ip:"" })
 ])
 const ram = medirRAM()
 
