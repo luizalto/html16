@@ -466,8 +466,13 @@ const [ctHash, stHash, countryHash] = await Promise.all([
 ])
 
 // =========================================================
-// VIEW CONTENT — com geo em hash (formato correto Meta)
+// VIEW CONTENT — geo só se rede for confiável
 // =========================================================
+// WiFi residencial (RH) ou navigator reportou WiFi (W) = dado de IP confiável
+// Mobile (M), corporativo/mobile (RC) ou desconhecido (RU) = IP pode estar errado
+// Mandar city/state errado piora o EMQ — melhor omitir do que poluir
+const geoConfiavel = (redeTag === "RH" || conexao === "W")
+
 try {
   const vcData = {
     content_ids:  [baseUC],
@@ -477,8 +482,8 @@ try {
     external_id:  userId,
     country:      countryHash,
   }
-  if(ctHash) vcData.ct = ctHash
-  if(stHash) vcData.st = stHash
+  if(geoConfiavel && ctHash) vcData.ct = ctHash
+  if(geoConfiavel && stHash) vcData.st = stHash
 
   fbq('track', 'ViewContent', vcData)
 } catch(e){}
