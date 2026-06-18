@@ -466,13 +466,16 @@ const [ctHash, stHash, countryHash] = await Promise.all([
 ])
 
 // =========================================================
-// VIEW CONTENT — geo só se rede for confiável
+// FILTRO DE CONFIANÇA DO GEO — vale pro Meta E pro Sheets
 // =========================================================
 // WiFi residencial (RH) ou navigator reportou WiFi (W) = dado de IP confiável
 // Mobile (M), corporativo/mobile (RC) ou desconhecido (RU) = IP pode estar errado
 // Mandar city/state errado piora o EMQ — melhor omitir do que poluir
 const geoConfiavel = (redeTag === "RH" || conexao === "W")
 
+// =========================================================
+// VIEW CONTENT
+// =========================================================
 try {
   const vcData = {
     content_ids:  [baseUC],
@@ -511,7 +514,7 @@ if(DEBUG){
 }
 
 // =========================================================
-// GOOGLE SHEETS
+// GOOGLE SHEETS — geo só se rede for confiável (mesmo filtro do Meta)
 // =========================================================
 try {
   const agora     = new Date()
@@ -529,8 +532,8 @@ try {
     velocidade         : velTag,
     uc_completo        : finalUC,
     geo_data           : JSON.stringify({
-      state   : geo.state_full || "",
-      city    : geo.city_full  || "",
+      state   : geoConfiavel ? (geo.state_full || "") : "",
+      city    : geoConfiavel ? (geo.city_full  || "") : "",
       country : "br",
       zip     : ""
     })
