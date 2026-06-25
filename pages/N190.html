@@ -363,7 +363,12 @@ async function getFbpWithRetry(maxTentativas = 5, intervaloMs = 100) {
 }
 const fbpValue = await getFbpWithRetry(5, 100);
 const FBP = (fbpValue !== "") ? 1 : 0;
-const fbcValue = getCookie("_fbc") || params.get("fbclid") || "";
+const fbcCookie = getCookie("_fbc") || "";
+const fbclidUrl = params.get("fbclid") || "";
+// _fbc do cookie já vem formatado corretamente (fb.1.<timestamp>.<click_id>).
+// Se só temos o fbclid da URL (cookie ainda não setado), formatamos manualmente
+// no padrão exigido pelo Meta: fb.<subdomain_index>.<timestamp_ms>.<fbclid>
+const fbcValue = fbcCookie || (fbclidUrl ? `fb.1.${Date.now()}.${fbclidUrl}` : "");
 const FBC = (fbcValue !== "") ? 1 : 0;
 
 const HP_PADRAO = 20
@@ -480,7 +485,8 @@ try {
   if(ctHash) vcData.ct = ctHash
   if(stHash) vcData.st = stHash
 
-  fbq('track', 'ViewContent', vcData)
+  const vcEventId = `vc_${userId}_${finalUC}`
+  fbq('track', 'ViewContent', vcData, { eventID: vcEventId })
 } catch(e){}
 
 // =========================================================
@@ -523,6 +529,7 @@ try {
     client_user_agent  : ua,
     velocidade         : velTag,
     uc_completo        : finalUC,
+    event_source_url   : LINK,
     geo_data           : JSON.stringify({
       state   : geo.state_full || "",
       city    : geo.city_full  || "",
