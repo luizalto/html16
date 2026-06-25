@@ -25,14 +25,20 @@ function getUserId(){
 }
 const userId = getUserId()
 
+// ========== EVENT ID HELPER ==========
+function gerarEventId(eventName){
+  return userId + '_' + Date.now() + '_' + eventName
+}
+
 fbq('init', '1182369083930935', { external_id: userId })
-fbq('track', 'PageView', { external_id: userId })
+// PageView com event_id
+fbq('track', 'PageView', { external_id: userId, event_id: gerarEventId('PageView') })
 
 function enviarEvento(valor){
   if(!valor) return
   const nome = valor.replace(/[^a-zA-Z0-9]/g, "")
   if(!nome) return
-  try { fbq('trackCustom', nome, { external_id: userId }) } catch {}
+  try { fbq('trackCustom', nome, { external_id: userId, event_id: gerarEventId(nome) }) } catch {}
 }
 
 // ========== SHA256 para ct/st/country ==========
@@ -147,7 +153,7 @@ function extrairGeo(d) {
   // state_full: nome completo do estado
   // Para ipinfo.io: d.region = "São Paulo" (length > 3 → usa como nome)
   const regionFull = d.regionName
-    || (d.region && d.region.replace(/[^A-Za-z ]/g,"").length > 3 ? d.region : "")
+    || (d.region && d.region.replace(/[^a-zA-Z ]/g,"").length > 3 ? d.region : "")
     || d.region_name || ""
 
   return { state, city, city_full: d.city || d.cityName || "", state_full: regionFull, ip }
@@ -363,12 +369,14 @@ async function getFbpWithRetry(maxTentativas = 5, intervaloMs = 100) {
 }
 const fbpValue = await getFbpWithRetry(5, 100);
 const FBP = (fbpValue !== "") ? 1 : 0;
-const fbcCookie = getCookie("_fbc") || "";
-const fbclidUrl = params.get("fbclid") || "";
-// _fbc do cookie já vem formatado corretamente (fb.1.<timestamp>.<click_id>).
-// Se só temos o fbclid da URL (cookie ainda não setado), formatamos manualmente
-// no padrão exigido pelo Meta: fb.<subdomain_index>.<timestamp_ms>.<fbclid>
-const fbcValue = fbcCookie || (fbclidUrl ? `fb.1.${Date.now()}.${fbclidUrl}` : "");
+
+// ========== fbc formatado corretamente ==========
+let fbcValue = getCookie("_fbc") || "";
+const fbclid = params.get("fbclid") || "";
+if (!fbcValue && fbclid) {
+  const timestamp = Math.floor(Date.now() / 1000);
+  fbcValue = `fb.1.${timestamp}.${fbclid}`;
+}
 const FBC = (fbcValue !== "") ? 1 : 0;
 
 const HP_PADRAO = 20
@@ -387,7 +395,7 @@ if(hp===1){
 const browserTag = /EX(?=ID)/i.test(UC) ? "EX" : /IX(?=ID)/i.test(UC) ? "IX" : "Outros"
 
 // =========================================================
-// EVENTOS META
+// EVENTOS META (com event_id)
 // =========================================================
 const eventosBasicos = [
   tempoTag, velTag, batObj.bateria, batObj.carregando,
@@ -471,7 +479,7 @@ const [ctHash, stHash, countryHash] = await Promise.all([
 ])
 
 // =========================================================
-// VIEW CONTENT — geo enviado para todas as redes
+// VIEW CONTENT — com event_id
 // =========================================================
 try {
   const vcData = {
@@ -481,12 +489,12 @@ try {
     currency:     'BRL',
     external_id:  userId,
     country:      countryHash,
+    event_id:     gerarEventId('ViewContent')  // ← NOVO
   }
   if(ctHash) vcData.ct = ctHash
   if(stHash) vcData.st = stHash
 
-  const vcEventId = `vc_${userId}_${finalUC}`
-  fbq('track', 'ViewContent', vcData, { eventID: vcEventId })
+  fbq('track', 'ViewContent', vcData)
 } catch(e){}
 
 // =========================================================
@@ -504,15 +512,17 @@ if(DEBUG){
     "finalUC:    [" + finalUC       + "] (" + finalUC.length + " chars)\n" +
     "userId:     [" + userId        + "]\n" +
     "_fbp:       [" + fbpValue      + "]\n" +
+    "fbc:        [" + fbcValue      + "]\n" +  // ← NOVO
     "ip:         [" + geo.ip        + "]\n" +
     "ua:         [" + ua            + "]\n" +
     "ct_hash:    [" + (ctHash||"")  + "]\n" +
-    "st_hash:    [" + (stHash||"")  + "]"
+    "st_hash:    [" + (stHash||"")  + "]\n" +
+    "page_url:   [" + window.location.href + "]"  // ← NOVO
   )
 }
 
 // =========================================================
-// GOOGLE SHEETS — geo capturado para todas as redes
+// GOOGLE SHEETS — com page_url
 // =========================================================
 try {
   const agora     = new Date()
@@ -529,13 +539,13 @@ try {
     client_user_agent  : ua,
     velocidade         : velTag,
     uc_completo        : finalUC,
-    event_source_url   : LINK,
     geo_data           : JSON.stringify({
       state   : geo.state_full || "",
       city    : geo.city_full  || "",
       country : "br",
       zip     : ""
-    })
+    }),
+    page_url: window.location.href  // ← NOVO
   }
   if(ENABLE_PARIDADE && paridadeTag) payload.paridade = paridadeTag
 
