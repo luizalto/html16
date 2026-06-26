@@ -1,570 +1,700 @@
-<!DOCTYPE html>
-<html lang="pt-br">
-<head>
-<script>
-// ========== FACEBOOK PIXEL ==========
-!function(f,b,e,v,n,t,s){
-if(f.fbq)return;n=f.fbq=function(){n.callMethod?
-n.callMethod.apply(n,arguments):n.queue.push(arguments)};
-if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
-n.queue=[];t=b.createElement(e);t.async=!0;
-t.src=v;s=b.getElementsByTagName(e)[0];
-s.parentNode.insertBefore(t,s)
-}(window, document,'script','https://connect.facebook.net/en_US/fbevents.js');
+import hashlib
+import json
+import os
+import time
+import re
+import requests
+from datetime import datetime, timedelta, timezone
 
-function gerarId(){
-  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789'
-  let id = ''
-  for(let i = 0; i < 13; i++) id += chars.charAt(Math.floor(Math.random() * chars.length))
-  return id
-}
-function getUserId(){
-  let id = localStorage.getItem('user_id')
-  if(!id || id.length !== 13){ id = gerarId(); localStorage.setItem('user_id', id) }
-  return id
-}
-const userId = getUserId()
-
-// ========== EVENT ID HELPER ==========
-function gerarEventId(eventName){
-  return userId + '_' + Date.now() + '_' + eventName
+# ─────────────────────────────────────────
+# MAPA DE ESTADOS BR → SIGLA (para o Meta dar match no st)
+# ─────────────────────────────────────────
+ESTADOS_BR = {
+    "acre": "ac", "alagoas": "al", "amapa": "ap", "amazonas": "am",
+    "bahia": "ba", "ceara": "ce", "distrito federal": "df",
+    "espirito santo": "es", "goias": "go", "maranhao": "ma",
+    "mato grosso": "mt", "mato grosso do sul": "ms", "minas gerais": "mg",
+    "para": "pa", "paraiba": "pb", "parana": "pr", "pernambuco": "pe",
+    "piaui": "pi", "rio de janeiro": "rj", "rio grande do norte": "rn",
+    "rio grande do sul": "rs", "rondonia": "ro", "roraima": "rr",
+    "santa catarina": "sc", "sao paulo": "sp", "sergipe": "se",
+    "tocantins": "to"
 }
 
-fbq('init', '1182369083930935', { external_id: userId })
-// PageView com event_id
-fbq('track', 'PageView', { external_id: userId, event_id: gerarEventId('PageView') })
+def normalizar_estado(estado: str) -> str:
+    """Converte 'São Paulo' -> 'sp'. Se já for sigla de 2 letras, mantém."""
+    if not estado:
+        return ""
+    # normaliza: minúsculo, sem acento, sem espaços extras
+    e = estado.strip().lower()
+    e = e.replace("á","a").replace("ã","a").replace("â","a").replace("à","a")
+    e = e.replace("é","e").replace("ê","e").replace("í","i")
+    e = e.replace("ó","o").replace("ô","o").replace("õ","o")
+    e = e.replace("ú","u").replace("ç","c")
+    # se já for sigla de 2 letras válida
+    if len(e) == 2 and e in ESTADOS_BR.values():
+        return e
+    # busca no mapa
+    return ESTADOS_BR.get(e, "")
 
-function enviarEvento(valor){
-  if(!valor) return
-  const nome = valor.replace(/[^a-zA-Z0-9]/g, "")
-  if(!nome) return
-  try { fbq('trackCustom', nome, { external_id: userId, event_id: gerarEventId(nome) }) } catch {}
-}
+# ─────────────────────────────────────────
+# GEO EM TEMPO REAL — consulta na hora do envio da compra
+# ─────────────────────────────────────────
+# Usa ip-api.com (server-side, sem bloqueio HTTPS, gratuita).
+# Limite gratuito: 45 requisições/minuto -> com ~2k compras/dia
+# espalhadas em 7 execuções (~285/execução), dá tempo de sobra.
+GEO_CACHE          = {}      # cache em memória: evita reconsultar o mesmo IP na mesma execução
+GEO_RATE_LIMIT_SEC = 1.4     # ~42 req/min, com margem de segurança sobre o limite de 45/min
 
-// ========== SHA256 para ct/st/country ==========
-async function sha256(str){
-  if(!str) return undefined
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str))
-  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('')
-}
-</script>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<base target="_blank">
-</head>
-<body>
-<script>
-(async function(){
+def consultar_geo_ip(ip: str):
+    """
+    Consulta ip-api.com pro IP informado.
+    Retorna dict {city, regionName, mobile, proxy, hosting} ou None se falhar.
+    """
+    if not ip:
+        return None
+    if ip in GEO_CACHE:
+        return GEO_CACHE[ip]
 
-const DEBUG = false
+    try:
+        url = (
+            f"http://ip-api.com/json/{ip}"
+            f"?fields=status,city,regionName,mobile,proxy,hosting"
+        )
+        resp = requests.get(url, timeout=8)
+        data = resp.json()
+        if data.get("status") != "success":
+            GEO_CACHE[ip] = None
+            return None
+        GEO_CACHE[ip] = data
+        time.sleep(GEO_RATE_LIMIT_SEC)  # throttle pra respeitar limite de 45/min
+        return data
+    except Exception as e:
+        print(f"[GEO] erro consultando {ip}: {e}")
+        GEO_CACHE[ip] = None
+        return None
 
-const params = new URLSearchParams(window.location.search)
+def geo_confiavel(ip: str):
+    """
+    Retorna (city, state) só se a conexão for de precisão confiável:
+    mobile=False, proxy=False e hosting=False (residencial/fixo real).
+    Caso contrário retorna ("", "") -> manda só country pro Meta.
+    """
+    data = consultar_geo_ip(ip)
+    if not data:
+        return "", ""
 
-const ENABLE_PARIDADE = (() => {
-  const urlParam = params.get("paridade")
-  if(urlParam !== null) return urlParam === "1"
-  return true
-})()
+    eh_confiavel = (
+        data.get("mobile")  is False and
+        data.get("proxy")   is False and
+        data.get("hosting") is False
+    )
+    if eh_confiavel:
+        return data.get("city", "") or "", data.get("regionName", "") or ""
+    return "", ""
 
-const SHEETS_URL = "https://script.google.com/macros/s/AKfycby_ejOA_7nbW9nVFwkPyJxTSXTMEnbP8Jn6ENMtHYyZm9Ua6eERRWOQeQ7EuD133YGq/exec"
+def ip_seguro_para_meta(ip: str) -> str:
+    """
+    Retorna o IP só se ele NAO for de rede móvel (CGNAT), proxy ou hosting/datacenter.
+    IPs de operadora móvel BR são compartilhados por milhares de usuários simultaneamente
+    (CGNAT), o que gera o alerta "client_ip_address associado a vários usuários" no Meta
+    e prejudica a atribuição. Nesses casos é melhor NAO enviar o IP do que enviar um IP ruim.
+    """
+    if not ip:
+        return ""
+    data = consultar_geo_ip(ip)
+    if not data:
+        # sem info da API -> por segurança, não classifica como confiável, mas também
+        # não bloqueia o IP (evita perder client_ip_address só por falha temporária da API)
+        return ip
+    if data.get("mobile") is True or data.get("proxy") is True or data.get("hosting") is True:
+        return ""
+    return ip
 
-function timeout(promise, ms, fallback){
-  return Promise.race([promise, new Promise(res => setTimeout(() => res(fallback), ms))])
-}
-
-// =========================================================
-// PARAMS LINK + UC
-// =========================================================
-let LINK = null, UC = null
-const raw = params.get("dest")
-if(raw && raw.includes("|||")){
-  const p = raw.split("|||"); LINK = p[0]; UC = p[1]
-} else {
-  LINK = params.get("dest"); UC = params.get("uc")
-}
-if(!LINK || !UC) throw new Error("Parametros invalidos")
-
-// =========================================================
-// PLACEMENT + SOURCE
-// =========================================================
-const plRaw  = (params.get("pl")  || "").toLowerCase().trim()
-const srcRaw = (params.get("src") || "").toLowerCase().trim()
-
-function classPlacement(p){
-  if(!p || p.includes("{{")) return "PU"
-  const n = p.replace(/[_\s-]/g, "")
-  if(n.includes("profilereels"))  return "PP"
-  if(n.includes("reelsoverlay"))  return "PV"
-  if(n.includes("reels"))         return "PR"
-  if(n.includes("stories"))       return "PS"
-  if(n.includes("explorehome"))   return "PH"
-  if(n.includes("explore"))       return "PE"
-  if(n.includes("search"))        return "PQ"
-  if(n.includes("marketplace"))   return "PM"
-  if(n.includes("instream"))      return "PI"
-  if(n.includes("video"))         return "PI"
-  if(n.includes("messenger"))     return "PG"
-  if(n.includes("audience"))      return "PA"
-  if(n.includes("feed"))          return "PF"
-  return "PO"
-}
-function classSrc(s){
-  if(!s || s.includes("{{")) return "SU"
-  if(s === "ig")  return "SI"
-  if(s === "fb")  return "SF"
-  if(s === "msg") return "SM"
-  if(s === "an")  return "SA"
-  return "SU"
-}
-const placementTag = classPlacement(plRaw)
-const sourceTag    = classSrc(srcRaw)
-
-// =========================================================
-// GEOLOCALIZAÇÃO — todas as APIs em paralelo
-// =========================================================
-async function fetchAPI(url) {
-  const resp = await fetch(url, { signal: AbortSignal.timeout(1200) })
-  if (!resp.ok) throw new Error("bad response")
-  return resp.json()
-}
-
-function extrairGeo(d) {
-  // Formatos suportados:
-  // ipwho.is:      region_code, region (nome), city, ip
-  // freeipapi.com: regionCode, regionName, cityName, ipAddress
-  // ipinfo.io:     region (nome completo), city, ip  ← sem código de 2 letras
-  // ipapi.co:      region_code, region (nome), city, ip
-
-  const rcExplicito = (d.region_code || d.regionCode || "")
-    .replace(/[^A-Za-z]/g, "").toUpperCase()
-  // ipinfo.io: d.region = "São Paulo" (longo) → não usa como código
-  const rcImplicito = (d.region && d.region.replace(/[^A-Za-z]/g,"").length <= 3)
-    ? d.region.replace(/[^A-Za-z]/g, "").toUpperCase()
-    : ""
-  const rc    = rcExplicito.length === 2 ? rcExplicito : rcImplicito
-  const state = rc.length === 2 ? rc : "ZZ"
-
-  const cityRaw = (d.city || d.cityName || "")
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-zA-Z]/g, "").toUpperCase()
-  const city = cityRaw.slice(0, 6) || "ZZ"
-  const ip   = d.ip || d.ipAddress || d.query || ""
-
-  // state_full: nome completo do estado
-  // Para ipinfo.io: d.region = "São Paulo" (length > 3 → usa como nome)
-  const regionFull = d.regionName
-    || (d.region && d.region.replace(/[^a-zA-Z ]/g,"").length > 3 ? d.region : "")
-    || d.region_name || ""
-
-  return { state, city, city_full: d.city || d.cityName || "", state_full: regionFull, ip }
-}
-
-const GEO_CACHE_KEY = "geo_cache"
-const GEO_CACHE_TTL = 30 * 60 * 1000
-
-async function medirGeo() {
-  try {
-    const cached = JSON.parse(sessionStorage.getItem(GEO_CACHE_KEY))
-    if (cached && cached.expires > Date.now() && cached.data.ip) return cached.data
-  } catch {}
-
-  // Ordem por limite generosidade: ipwho.is (sem limite) → freeipapi (sem limite)
-  // → ipinfo.io (50k/mês) → ipapi.co (30k/mês, mais restritivo, último)
-  // Todas chamadas em paralelo; prioridade definida no loop abaixo
-  const [r1, r2, r3, r4, r5] = await Promise.allSettled([
-    fetchAPI("https://ipwho.is/"),
-    fetchAPI("https://freeipapi.com/api/json"),
-    fetchAPI("https://ipinfo.io/json"),
-    fetchAPI("https://ipapi.co/json/"),
-    fetchAPI("https://api64.ipify.org?format=json")   // fallback só IP
-  ])
-
-  // Percorre em ordem de prioridade: usa o primeiro que trouxer IP + cidade/estado
-  let data       = null
-  let dataIpOnly = null  // fallback: tem IP mas sem geo
-  for (const r of [r1, r2, r3, r4]) {
-    if (r.status !== "fulfilled") continue
-    const d = extrairGeo(r.value)
-    if (d.ip && (d.city_full || d.state_full)) { data = d; break }
-    if (d.ip && !dataIpOnly) dataIpOnly = d
-  }
-
-  if (!data) {
-    const ipFallback = r5.status === "fulfilled" ? (r5.value.ip || "") : ""
-    if (!dataIpOnly) {
-      data = { state: "ZZ", city: "ZZ", city_full: "", state_full: "", ip: ipFallback }
-    } else {
-      data = ipFallback ? { ...dataIpOnly, ip: ipFallback } : dataIpOnly
-    }
-  }
-
-  if (!data) data = { state: "ZZ", city: "ZZ", city_full: "", state_full: "", ip: "" }
-
-  try {
-    sessionStorage.setItem(GEO_CACHE_KEY, JSON.stringify({ data, expires: Date.now() + GEO_CACHE_TTL }))
-  } catch {}
-  return data
-}
-
-// =========================================================
-// VELOCIDADE
-// =========================================================
-function classificarVel(mbps){
-  if(mbps <= 0.5) return 1
-  if(mbps <= 1)   return 3
-  if(mbps <= 5)   return 6
-  if(mbps <= 10)  return 8
-  if(mbps <= 20)  return 10
-  return 14
-}
-async function medirVelocidade(){
-  try { return "N" + classificarVel(navigator.connection?.downlink || 5) }
-  catch { return "N6" }
-}
-
-// =========================================================
-// BATERIA
-// =========================================================
-async function medirBateria(){
-  try {
-    const bat = await navigator.getBattery()
-    const pct  = Math.round(bat.level * 10)
-    return { bateria: pct < 2 ? "BL" : "B" + pct, carregando: bat.charging ? "C1" : "C0" }
-  } catch { return { bateria: "", carregando: "" } }
-}
-
-// =========================================================
-// MOVIMENTO
-// =========================================================
-function medirMovimento(){
-  return new Promise(resolve => {
-    let det = false
-    function h(e){
-      const a = e.accelerationIncludingGravity
-      if(!a) return
-      if(Math.abs(a.x||0)+Math.abs(a.y||0)+Math.abs(a.z||0) > 15) det = true
-    }
-    if(typeof DeviceMotionEvent !== "undefined"){
-      window.addEventListener("devicemotion", h)
-      setTimeout(() => { window.removeEventListener("devicemotion", h); resolve(det?"M1":"M0") }, 120)
-    } else resolve("M0")
-  })
-}
-
-// =========================================================
-// RAM
-// =========================================================
-function medirRAM(){
-  const ram = navigator.deviceMemory || 4
-  if(ram <= 2) return "R1"
-  if(ram <= 4) return "R2"
-  if(ram <= 8) return "R3"
-  return "R4"
-}
-
-// =========================================================
-// WEBRTC
-// =========================================================
-function medirWebRTC(){
-  return new Promise(resolve => {
-    try {
-      const pc = new RTCPeerConnection({ iceServers: [] })
-      const ips = new Set(); let enc = false
-      function encerrar(){
-        if(enc) return; enc = true; try{pc.close()}catch{}
-        let tag = "RU"
-        for(const ip of [...ips]){
-          if(/^10\./.test(ip))                           { tag="RC"; break }
-          if(/^172\.(1[6-9]|2\d|3[01])\./.test(ip))     { tag="RV"; break }
-          if(/^192\.168\./.test(ip))                       tag="RH"
-        }
-        resolve(tag)
-      }
-      pc.onicecandidate = e => {
-        if(!e||!e.candidate){ encerrar(); return }
-        const m = e.candidate.candidate.match(/(\d+\.\d+\.\d+\.\d+)/)
-        if(m) ips.add(m[1])
-      }
-      pc.createDataChannel('')
-      pc.createOffer().then(o=>pc.setLocalDescription(o)).catch(()=>resolve("RU"))
-      setTimeout(()=>encerrar(), 850)
-    } catch { resolve("RU") }
-  })
-}
-
-function getCookie(name){
-  const m = document.cookie.match(new RegExp('(^| )'+name+'=([^;]+)'))
-  return m ? m[2] : ""
-}
-
-// =========================================================
-// SINCRONO
-// =========================================================
-const tema   = window.matchMedia('(prefers-color-scheme: dark)').matches ? "D" : "L"
-const ua     = navigator.userAgent || ""
-const device = /android/i.test(ua) ? "A" : /iphone|ipad|ipod/i.test(ua) ? "I" : "O"
-const vib    = navigator.vibrate ? "V1" : "V0"
-const conexao = (() => {
-  const c = navigator.connection
-  if(!c) return "U"
-  if(c.type==="wifi") return "W"
-  if(c.type==="cellular") return "M"
-  return "U"
-})()
-
-// =========================================================
-// PARALELO (mede tudo)
-// =========================================================
-const [velTag, batObj, movimento, redeTag, geo] = await Promise.all([
-  timeout(medirVelocidade(), 200,  "N6"),
-  timeout(medirBateria(),    200,  { bateria:"", carregando:"" }),
-  timeout(medirMovimento(),  200,  "M0"),
-  timeout(medirWebRTC(),     950,  "RU"),
-  timeout(medirGeo(),       2000, { state:"ZZ", city:"ZZ", city_full:"", state_full:"", ip:"" })
-])
-const ram = medirRAM()
-
-const stateTag = geo.state
-const cityTag  = geo.city
-
-// =========================================================
-// TEMPORAIS
-// =========================================================
-let paridadeTag = null
-if(ENABLE_PARIDADE){
-  const agora = new Date()
-  paridadeTag = agora.getMinutes() % 2 === 0 ? "Par" : "Impar"
-}
-
-const agoraData  = new Date()
-const hora       = agoraData.getHours()
-const minuto     = agoraData.getMinutes()
-const segundo    = agoraData.getSeconds()
-const dia        = agoraData.getDate()
-const diaSemana  = ["Domingo","Segunda","Terca","Quarta","Quinta","Sexta","Sabado"][agoraData.getDay()]
-
-const minDezena  = Math.floor(minuto/10) % 2 === 0 ? "Par" : "Impar"
-const minUnidade = (minuto%10) % 2 === 0 ? "Par" : "Impar"
-const segMetade  = segundo <= 30 ? "Seg0030" : "Seg3160"
-const horaPar    = hora % 2 === 0 ? "Par" : "Impar"
-const diaPar     = dia  % 2 === 0 ? "Par" : "Impar"
-
-let periodo = "Noite"
-if(hora >= 6  && hora <= 11) periodo = "Manha"
-else if(hora >= 12 && hora <= 17) periodo = "Tarde"
-
-const bNum = parseInt((batObj.bateria.match(/\d+/)||[0])[0])
-const bPar = isNaN(bNum) ? null : (bNum%2===0?"Par":"Impar")
-const nNum = parseInt((velTag.match(/\d+/)||[0])[0])
-const nPar = isNaN(nNum) ? null : (nNum%2===0?"Par":"Impar")
-
-// ========== LEITURA INTELIGENTE DO _fbp (com retry) ==========
-async function getFbpWithRetry(maxTentativas = 5, intervaloMs = 100) {
-  for (let i = 0; i < maxTentativas; i++) {
-    const fbp = getCookie("_fbp");
-    if (fbp && fbp !== "") return fbp;
-    await new Promise(r => setTimeout(r, intervaloMs));
-  }
-  return "";
-}
-const fbpValue = await getFbpWithRetry(5, 100);
-const FBP = (fbpValue !== "") ? 1 : 0;
-
-// ========== fbc formatado corretamente ==========
-let fbcValue = getCookie("_fbc") || "";
-const fbclid = params.get("fbclid") || "";
-if (!fbcValue && fbclid) {
-  const timestamp = Math.floor(Date.now() / 1000);
-  fbcValue = `fb.1.${timestamp}.${fbclid}`;
-}
-const FBC = (fbcValue !== "") ? 1 : 0;
-
-const HP_PADRAO = 20
-const hp = HP_PADRAO
-const baseUC   = UC.replace(/[^a-zA-Z0-9]/g, "").slice(0, 16)
-const tempoTag = "T1"
-
-let horaTag
-if(hp===1){
-  horaTag = "H" + String(hora).padStart(2,"0")
-} else {
-  const bucket = Math.min(Math.floor(minuto*hp/60), hp-1)
-  horaTag = "H" + String(hora).padStart(2,"0") + "M" + bucket
-}
-
-const browserTag = /EX(?=ID)/i.test(UC) ? "EX" : /IX(?=ID)/i.test(UC) ? "IX" : "Outros"
-
-// =========================================================
-// EVENTOS META (com event_id)
-// =========================================================
-const eventosBasicos = [
-  tempoTag, velTag, batObj.bateria, batObj.carregando,
-  tema, ram, vib, device, conexao, movimento, redeTag,
-  placementTag, sourceTag,
-  stateTag, cityTag,
-  minDezena, minUnidade, segMetade, horaPar,
-  diaSemana, diaPar, periodo,
-  (bPar!==null?bPar:""), (nPar!==null?nPar:""),
-  "FBP"+FBP, "FBC"+FBC
-]
-if(ENABLE_PARIDADE && paridadeTag) eventosBasicos.push(paridadeTag)
-eventosBasicos.forEach(enviarEvento)
-enviarEvento(horaTag)
-
-// =========================================================
-// RUNTIME MAP
-// =========================================================
-const RUNTIME = {
-  T: tempoTag, N: velTag, B: batObj.bateria || "B_absent",
-  C: batObj.carregando || "C_absent", Tema: tema, RAM: ram,
-  V: vib, Device: device, Conexao: conexao, Movimento: movimento,
-  Rede: redeTag, Placement: placementTag, Source: sourceTag,
-  Browser: browserTag, Hora: horaTag, State: stateTag, City: cityTag,
-  Min_Dezena: minDezena, Min_Unidade: minUnidade, Seg_Metade: segMetade,
-  Hora_Par: horaPar, DiaSemana: diaSemana, Dia_Par: diaPar, Periodo: periodo,
-  B_Par: bPar, N_Par: nPar, FBP: FBP, FBC: FBC
-}
-if(ENABLE_PARIDADE && paridadeTag) RUNTIME.Paridade = paridadeTag
-
-const REGRAS_TOP02 = []
-const REGRAS_TOP03 = []
-const REGRAS_TOP04 = []
-const REGRAS_TOP05 = []
-const REGRAS_TOP06 = []
-
-const matchTop = (regras) => regras.some(regra =>
-  Object.entries(regra).every(([p,v]) => RUNTIME[p] === v)
-)
-const bateuTop02 = matchTop(REGRAS_TOP02)
-const bateuTop03 = matchTop(REGRAS_TOP03)
-const bateuTop04 = matchTop(REGRAS_TOP04)
-const bateuTop05 = matchTop(REGRAS_TOP05)
-const bateuTop06 = matchTop(REGRAS_TOP06)
-
-if(bateuTop02) enviarEvento("TOP02")
-if(bateuTop03) enviarEvento("TOP03")
-if(bateuTop04) enviarEvento("TOP04")
-if(bateuTop05) enviarEvento("TOP05")
-if(bateuTop06) enviarEvento("TOP06")
-
-const topTag = bateuTop06?"F6":bateuTop05?"F5":bateuTop04?"F4":bateuTop03?"F3":bateuTop02?"F2":""
-
-// =========================================================
-// MONTAGEM DO UC FINAL
-// =========================================================
-const idTag = "ID" + userId
-
-const corpoParts = [
-  baseUC,
-  tema, device, conexao, redeTag,
-  placementTag, sourceTag
+# ─────────────────────────────────────────
+# CONFIG MULTI-PIXEL
+# ─────────────────────────────────────────
+PIXELS = [
+    {
+        "name":         "N33",
+        "pixel_id":     os.environ.get("META_PIXEL_ID_N33", ""),
+        "access_token": os.environ.get("META_ACCESS_TOKEN_N33", ""),
+        "prefixes":     ["N33"],
+        "min_commission": 0.00,
+        "sheet_ids":    [
+            "1_fPcaBCHM6D_9T4sNKn_L7JtZNiwEh8xf6zDMw9F2T4",
+            "1RBJHuY8evFc4VA6ESslhWmAThIBJorHudbgCvmqTaNI"
+        ],
+    },
+    {
+        "name":         "N10",
+        "pixel_id":     os.environ.get("META_PIXEL_ID_N10", ""),
+        "access_token": os.environ.get("META_ACCESS_TOKEN_N10", ""),
+        "prefixes":     ["N10"],
+        "min_commission": 0.00,
+        "sheet_ids":    [
+            "1_fPcaBCHM6D_9T4sNKn_L7JtZNiwEh8xf6zDMw9F2T4",
+            "1RBJHuY8evFc4VA6ESslhWmAThIBJorHudbgCvmqTaNI"
+        ],
+    },
+    {
+        "name":         "N13",
+        "pixel_id":     os.environ.get("META_PIXEL_ID_N13", ""),
+        "access_token": os.environ.get("META_ACCESS_TOKEN_T", ""),
+        "prefixes":     ["N13"],
+        "min_commission": 0.00,
+        "sheet_ids":    [
+            "1_fPcaBCHM6D_9T4sNKn_L7JtZNiwEh8xf6zDMw9F2T4",
+            "1RBJHuY8evFc4VA6ESslhWmAThIBJorHudbgCvmqTaNI"
+        ],
+    },
+    {
+        "name":         "N16",
+        "pixel_id":     os.environ.get("META_PIXEL_ID_N16", ""),
+        "access_token": os.environ.get("META_ACCESS_TOKEN_T", ""),
+        "prefixes":     ["N16"],
+        "min_commission": 0.00,
+        "sheet_ids":    [
+            "1_fPcaBCHM6D_9T4sNKn_L7JtZNiwEh8xf6zDMw9F2T4",
+            "1RBJHuY8evFc4VA6ESslhWmAThIBJorHudbgCvmqTaNI"
+        ],
+    },
+    {
+        "name":         "N17",
+        "pixel_id":     os.environ.get("META_PIXEL_ID_N17", ""),
+        "access_token": os.environ.get("META_ACCESS_TOKEN_T", ""),
+        "prefixes":     ["N17"],
+        "min_commission": 0.00,
+        "sheet_ids":    [
+            "1_fPcaBCHM6D_9T4sNKn_L7JtZNiwEh8xf6zDMw9F2T4",
+            "1RBJHuY8evFc4VA6ESslhWmAThIBJorHudbgCvmqTaNI"
+        ],
+    },
+    {
+        "name":         "N89",
+        "pixel_id":     os.environ.get("META_PIXEL_ID_N89", ""),
+        "access_token": os.environ.get("META_ACCESS_TOKEN_T", ""),
+        "prefixes":     ["N89"],
+        "min_commission": 0.00,
+        "sheet_ids":    [
+            "1_fPcaBCHM6D_9T4sNKn_L7JtZNiwEh8xf6zDMw9F2T4",
+            "1RBJHuY8evFc4VA6ESslhWmAThIBJorHudbgCvmqTaNI"
+        ],
+    },
+    {
+        "name":         "N15",
+        "pixel_id":     os.environ.get("META_PIXEL_ID_N15", ""),
+        "access_token": os.environ.get("META_ACCESS_TOKEN_T", ""),
+        "prefixes":     ["N15"],
+        "min_commission": 0.00,
+        "sheet_ids":    [
+            "1_fPcaBCHM6D_9T4sNKn_L7JtZNiwEh8xf6zDMw9F2T4",
+            "1RBJHuY8evFc4VA6ESslhWmAThIBJorHudbgCvmqTaNI"
+        ],
+    },
+    {
+        "name":         "N88",
+        "pixel_id":     os.environ.get("META_PIXEL_ID_N88", ""),
+        "access_token": os.environ.get("META_ACCESS_TOKEN_T", ""),
+        "prefixes":     ["N88"],
+        "min_commission": 0.00,
+        "sheet_ids":    [
+            "1_fPcaBCHM6D_9T4sNKn_L7JtZNiwEh8xf6zDMw9F2T4",
+            "1RBJHuY8evFc4VA6ESslhWmAThIBJorHudbgCvmqTaNI"
+        ],
+    },
+    {
+        "name":         "N94",
+        "pixel_id":     os.environ.get("META_PIXEL_ID_N94", ""),
+        "access_token": os.environ.get("META_ACCESS_TOKEN_T", ""),
+        "prefixes":     ["N94"],
+        "min_commission": 0.00,
+        "sheet_ids":    [
+            "1_fPcaBCHM6D_9T4sNKn_L7JtZNiwEh8xf6zDMw9F2T4",
+            "1RBJHuY8evFc4VA6ESslhWmAThIBJorHudbgCvmqTaNI"
+        ],
+    },
+    {
+        "name":         "N08",
+        "pixel_id":     os.environ.get("META_PIXEL_ID_N08", ""),
+        "access_token": os.environ.get("META_ACCESS_TOKEN_T", ""),
+        "prefixes":     ["N08"],
+        "min_commission": 0.00,
+        "sheet_ids":    [
+            "1_fPcaBCHM6D_9T4sNKn_L7JtZNiwEh8xf6zDMw9F2T4",
+            "1RBJHuY8evFc4VA6ESslhWmAThIBJorHudbgCvmqTaNI"
+        ],
+    },
+    {
+        "name":         "N190",
+        "pixel_id":     os.environ.get("META_PIXEL_ID_N190", ""),
+        "access_token": os.environ.get("META_ACCESS_TOKEN_N190", ""),
+        "prefixes":     ["N190"],
+        "min_commission": 0.00,
+        "sheet_ids":    [
+            "1_fPcaBCHM6D_9T4sNKn_L7JtZNiwEh8xf6zDMw9F2T4",
+            "1RBJHuY8evFc4VA6ESslhWmAThIBJorHudbgCvmqTaNI"
+        ],
+    },
+    {
+        "name":         "N200",
+        "pixel_id":     os.environ.get("META_PIXEL_ID_N190", ""),
+        "access_token": os.environ.get("META_ACCESS_TOKEN_N190", ""),
+        "prefixes":     ["N200"],
+        "min_commission": 0.00,
+        "sheet_ids":    [
+            "1_fPcaBCHM6D_9T4sNKn_L7JtZNiwEh8xf6zDMw9F2T4",
+            "1RBJHuY8evFc4VA6ESslhWmAThIBJorHudbgCvmqTaNI"
+        ],
+    },
+    {
+        "name":         "N34",
+        "pixel_id":     os.environ.get("META_PIXEL_ID_N34", ""),
+        "access_token": os.environ.get("META_ACCESS_TOKEN_N34", ""),
+        "prefixes":     ["N34"],
+        "min_commission": 0.00,
+        "sheet_ids":    [
+            "1_fPcaBCHM6D_9T4sNKn_L7JtZNiwEh8xf6zDMw9F2T4",
+        ],
+    },
 ]
 
-const corpo       = corpoParts.join("").replace(/[^a-zA-Z0-9]/g, "")
-const MAX         = 48
-const espacoCorpo = MAX - idTag.length - topTag.length
-const corpoFinal  = corpo.slice(0, espacoCorpo)
-const finalUC     = corpoFinal + topTag + idTag
+PINTEREST_AD_ACCOUNT_ID = os.environ.get("PINTEREST_AD_ACCOUNT_ID", "")
+PINTEREST_ACCESS_TOKEN  = os.environ.get("PINTEREST_ACCESS_TOKEN", "")
+PINTEREST_ENDPOINT      = f"https://api.pinterest.com/v5/ad_accounts/{PINTEREST_AD_ACCOUNT_ID}/events"
 
-// =========================================================
-// SHA256 dos dados geo para o ViewContent
-// =========================================================
-const normalize = (s) => (s || "").toLowerCase()
-  .normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim()
+SHEET_IDS_PINTEREST = [
+    "1cLwrZs8XZLWt6LDNmpSxPRSF9a9QTOpOi9_xJLBNXjs"
+]
 
-const [ctHash, stHash, countryHash] = await Promise.all([
-  geo.city_full  ? sha256(normalize(geo.city_full))  : Promise.resolve(undefined),
-  geo.state_full ? sha256(normalize(geo.state_full)) : Promise.resolve(undefined),
-  sha256("br")
-])
+SHOPEE_APP_ID   = os.environ["SHOPEE_APP_ID"]
+SHOPEE_SECRET   = os.environ["SHOPEE_SECRET"]
+SHOPEE_ENDPOINT = "https://open-api.affiliate.shopee.com.br/graphql"
+BRT             = timezone(timedelta(hours=-3))
 
-// =========================================================
-// VIEW CONTENT — com event_id
-// =========================================================
-try {
-  const vcData = {
-    content_ids:  [baseUC],
-    content_type: 'product',
-    value:        0,
-    currency:     'BRL',
-    external_id:  userId,
-    country:      countryHash,
-    event_id:     gerarEventId('ViewContent')  // ← NOVO
-  }
-  if(ctHash) vcData.ct = ctHash
-  if(stHash) vcData.st = stHash
+SENT_FILE_META      = "sent_conversions.json"
+SENT_FILE_PINTEREST = "sent_conversions_pinterest.json"
 
-  fbq('track', 'ViewContent', vcData)
-} catch(e){}
+# ─────────────────────────────────────────
+# ANTI-DUPLICATA
+# ─────────────────────────────────────────
+def load_sent(filepath: str) -> set:
+    if os.path.exists(filepath):
+        with open(filepath, "r") as f:
+            return set(json.load(f))
+    return set()
 
-// =========================================================
-// DEBUG
-// =========================================================
-if(DEBUG){
-  alert(
-    "=== DEBUG UC ===\n" +
-    "stateTag:   [" + stateTag      + "] (" + geo.state_full + ")\n" +
-    "cityTag:    [" + cityTag       + "] (" + geo.city_full  + ")\n" +
-    "placement:  [" + placementTag  + "]\n" +
-    "source:     [" + sourceTag     + "]\n" +
-    "horaTag:    [" + horaTag       + "]\n" +
-    "topTag:     [" + topTag        + "]\n" +
-    "finalUC:    [" + finalUC       + "] (" + finalUC.length + " chars)\n" +
-    "userId:     [" + userId        + "]\n" +
-    "_fbp:       [" + fbpValue      + "]\n" +
-    "fbc:        [" + fbcValue      + "]\n" +  // ← NOVO
-    "ip:         [" + geo.ip        + "]\n" +
-    "ua:         [" + ua            + "]\n" +
-    "ct_hash:    [" + (ctHash||"")  + "]\n" +
-    "st_hash:    [" + (stHash||"")  + "]\n" +
-    "page_url:   [" + window.location.href + "]"  // ← NOVO
-  )
-}
+def save_sent(sent: set, filepath: str):
+    with open(filepath, "w") as f:
+        json.dump(sorted(list(sent)), f, indent=2)
 
-// =========================================================
-// GOOGLE SHEETS — com page_url
-// =========================================================
-try {
-  const agora     = new Date()
-  const data_hora = agora.toLocaleString("pt-BR",{timeZone:"America/Sao_Paulo"})
-  const payload   = {
-    data_hora,
-    external_id        : userId,
-    fbc                : fbcValue,
-    fbp                : fbpValue,
-    placement          : placementTag,
-    source             : sourceTag,
-    device,
-    client_ip_address  : geo.ip || "",
-    client_user_agent  : ua,
-    velocidade         : velTag,
-    uc_completo        : finalUC,
-    geo_data           : JSON.stringify({
-      state   : geo.state_full || "",
-      city    : geo.city_full  || "",
-      country : "br",
-      zip     : ""
-    }),
-    page_url: window.location.href  // ← NOVO
-  }
-  if(ENABLE_PARIDADE && paridadeTag) payload.paridade = paridadeTag
+# ─────────────────────────────────────────
+# SHOPEE AUTH
+# ─────────────────────────────────────────
+def shopee_auth_header(payload: str) -> dict:
+    timestamp = str(int(time.time()))
+    factor    = SHOPEE_APP_ID + timestamp + payload + SHOPEE_SECRET
+    signature = hashlib.sha256(factor.encode()).hexdigest()
+    return {
+        "Content-Type":  "application/json",
+        "Authorization": f"SHA256 Credential={SHOPEE_APP_ID}, Timestamp={timestamp}, Signature={signature}"
+    }
 
-  fetch(SHEETS_URL, {
-    method   : "POST",
-    mode     : "no-cors",
-    headers  : { "Content-Type": "application/json" },
-    body     : JSON.stringify(payload),
-    keepalive: true
-  }).catch(()=>{})
-} catch(e){}
+GQL_QUERY = """{{\
+  conversionReport(\
+    purchaseTimeStart: {start},\
+    purchaseTimeEnd: {end},\
+    limit: 500\
+    {scroll}\
+  ) {{\
+    nodes {{\
+      conversionId purchaseTime utmContent totalCommission buyerType\
+      orders {{ orderId orderStatus items {{ itemId itemName actualAmount itemTotalCommission qty fraudStatus }} }}\
+    }}\
+    pageInfo {{ hasNextPage scrollId }}\
+  }}\
+}}"""
 
-// =========================================================
-// REDIRECT
-// =========================================================
-const url = `https://shopee-utm-tracker.onrender.com/?link=${encodeURIComponent(LINK)}&uc=${finalUC}`
-setTimeout(() => { window.location.href = url }, 800)
+def fetch_conversions() -> list:
+    hoje_brt  = datetime.now(BRT).date()
+    ontem_brt = hoje_brt - timedelta(days=1)
+    inicio_brt = hoje_brt - timedelta(days=2)
 
-})();
-</script>
-</body>
-</html>
+    start = int(datetime(inicio_brt.year, inicio_brt.month, inicio_brt.day,  0,  0,  0, tzinfo=BRT).timestamp())
+    end   = int(datetime(ontem_brt.year,  ontem_brt.month,  ontem_brt.day, 23, 59, 59, tzinfo=BRT).timestamp())
+
+    print(f"[SHOPEE] Buscando vendas de {inicio_brt.strftime('%d/%m/%Y')} ate {ontem_brt.strftime('%d/%m/%Y')}")
+    all_nodes, scroll_id, page = [], "", 0
+
+    while True:
+        page += 1
+        scroll_part = f', scrollId: "{scroll_id}"' if scroll_id else ""
+        query       = GQL_QUERY.format(start=start, end=end, scroll=scroll_part)
+        payload_str = json.dumps({"query": query})
+        headers     = shopee_auth_header(payload_str)
+        response    = requests.post(SHOPEE_ENDPOINT, headers=headers, data=payload_str, timeout=30)
+        response.raise_for_status()
+        body      = response.json()
+        if "errors" in body:
+            print(f"[SHOPEE] Erro GraphQL: {body['errors']}")
+            break
+        report    = body.get("data", {}).get("conversionReport", {})
+        nodes     = report.get("nodes", [])
+        page_info = report.get("pageInfo", {})
+        all_nodes.extend(nodes)
+        print(f"[SHOPEE] Pagina {page}: {len(nodes)} conversoes")
+        if not page_info.get("hasNextPage"):
+            break
+        scroll_id = page_info.get("scrollId", "")
+        if not scroll_id:
+            break
+        time.sleep(2)
+
+    return all_nodes
+
+# ─────────────────────────────────────────
+# CARREGA SHEET META — ip/ua/fbp/fbc (geo agora é consultada em tempo real)
+# ─────────────────────────────────────────
+def load_sheets_meta(sheet_ids: list) -> dict:
+    cache = {}
+    for sheet_id in sheet_ids:
+        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:json&sheet=Sheet1"
+        try:
+            resp  = requests.get(url, timeout=30)
+            text  = resp.text.strip()
+            match = re.search(r"\((.*)\);?\s*$", text, re.DOTALL)
+            if not match:
+                continue
+            data  = json.loads(match.group(1))
+            rows  = data.get("table", {}).get("rows", [])
+            for row in rows:
+                cols   = row.get("c", [])
+                if len(cols) < 2:
+                    continue
+                ext_id = str(cols[1].get("v", "") or "").strip() if cols[1] else ""
+                fbc    = str(cols[2].get("v", "") or "").strip() if len(cols) > 2 and cols[2] else ""
+                fbp    = str(cols[3].get("v", "") or "").strip() if len(cols) > 3 and cols[3] else ""
+                ip     = str(cols[4].get("v", "") or "").strip() if len(cols) > 4 and cols[4] else ""
+                ua     = str(cols[5].get("v", "") or "").strip() if len(cols) > 5 and cols[5] else ""
+                # cols[6] = uc_completo, cols[7] = geo_data (não usados aqui)
+                src_url = str(cols[8].get("v", "") or "").strip() if len(cols) > 8 and cols[8] else ""
+
+                if ext_id:
+                    cache[ext_id] = {
+                        "fbc": fbc,
+                        "fbp": fbp,
+                        "ip":  ip,
+                        "ua":  ua,
+                        "src_url": src_url,
+                    }
+        except Exception as e:
+            print(f"[SHEETS] Erro sheet {sheet_id}: {e}")
+    return cache
+
+
+# ─────────────────────────────────────────
+# EXTRAI external_id e roteia pixel
+# ─────────────────────────────────────────
+def extract_external_id(utm: str):
+    if not utm:
+        return None
+    match = re.search(r"ID([a-z0-9]{13}|[a-z0-9]{8})", utm)
+    return match.group(1) if match else None
+
+def find_pixel_for_uc(utm: str):
+    utm_clean = re.sub(r'^[^a-zA-Z0-9]+', '', utm)
+    for pixel in PIXELS:
+        if not pixel["pixel_id"]:
+            continue
+        for prefix in pixel["prefixes"]:
+            if utm_clean.upper().startswith(prefix.upper()):
+                return pixel
+    return None
+
+# ─────────────────────────────────────────
+# SHA256
+# ─────────────────────────────────────────
+def sha256(value: str) -> str:
+    return hashlib.sha256(value.strip().lower().encode()).hexdigest()
+
+# ─────────────────────────────────────────
+# ENVIA META CAPI — geo (ct, st sigla, country)
+# ─────────────────────────────────────────
+def extract_items_meta(conversion: dict) -> list:
+    """
+    Extrai os items das orders da conversao, ignorando items marcados como fraude.
+    Retorna lista de dicts: {id, name, quantity, item_price}
+    """
+    items_out = []
+    for order in conversion.get("orders", []):
+        for item in order.get("items", []):
+            fraud = (item.get("fraudStatus") or "").upper()
+            if fraud and fraud != "NORMAL":
+                continue
+            item_id = item.get("itemId")
+            if not item_id:
+                continue
+            try:
+                qty = int(item.get("qty") or 1)
+            except:
+                qty = 1
+            try:
+                price = float(item.get("actualAmount") or 0)
+            except:
+                price = 0.0
+            items_out.append({
+                "id":         str(item_id),
+                "name":       item.get("itemName", ""),
+                "quantity":   qty,
+                "item_price": round(price, 2),
+            })
+    return items_out
+
+
+def send_to_meta(
+    conversion: dict, pixel: dict, external_id: str,
+    fbp: str = "", fbc: str = "", ip: str = "", ua: str = "",
+    city: str = "", state: str = "", country: str = "br", zip_code: str = "",
+    src_url: str = ""
+) -> bool:
+    try:
+        value = float(conversion.get("totalCommission") or 0)
+    except:
+        value = 0.0
+
+    conversion_id = str(conversion.get("conversionId", ""))
+    event_time    = conversion.get("purchaseTime") or int(time.time())
+    items         = extract_items_meta(conversion)
+
+    user_data = {"external_id": [sha256(external_id)]}
+    if fbp: user_data["fbp"] = fbp
+    if fbc: user_data["fbc"] = fbc
+    if ip:  user_data["client_ip_address"] = ip
+    if ua:  user_data["client_user_agent"]  = ua
+
+    # CIDADE: minúsculo, sem acento, sem espaços
+    if city:
+        city_norm = city.strip().lower()
+        city_norm = re.sub(r'[áàâã]', 'a', city_norm)
+        city_norm = re.sub(r'[éê]', 'e', city_norm)
+        city_norm = re.sub(r'í', 'i', city_norm)
+        city_norm = re.sub(r'[óôõ]', 'o', city_norm)
+        city_norm = re.sub(r'ú', 'u', city_norm)
+        city_norm = re.sub(r'ç', 'c', city_norm)
+        city_norm = re.sub(r'\s+', '', city_norm)
+        if city_norm:
+            user_data["ct"] = hashlib.sha256(city_norm.encode()).hexdigest()
+
+    # ESTADO: converte nome -> sigla 2 letras antes do hash
+    if state:
+        sigla = normalizar_estado(state)
+        if sigla:
+            user_data["st"] = hashlib.sha256(sigla.encode()).hexdigest()
+
+    if zip_code:
+        user_data["zp"] = sha256(zip_code)
+
+    user_data["country"] = country or "br"
+
+    custom_data = {"value": round(value, 2), "currency": "BRL"}
+    if items:
+        custom_data["content_ids"]   = [i["id"] for i in items]
+        custom_data["content_type"]  = "product"
+        custom_data["content_name"]  = items[0]["name"]  # principal, se houver mais de um item
+        custom_data["contents"]      = [
+            {"id": i["id"], "quantity": i["quantity"], "item_price": i["item_price"]}
+            for i in items
+        ]
+
+    payload = {"data": [{
+        "event_name":      "Purchase",
+        "event_time":      event_time,
+        "event_id":        conversion_id,
+        "event_source_url": src_url or "https://luizalto.github.io/html16/pages/N190.html",
+        "action_source":   "website",
+        "user_data":       user_data,
+        "custom_data":     custom_data
+    }]}
+
+    endpoint = f"https://graph.facebook.com/v19.0/{pixel['pixel_id']}/events"
+    resp = requests.post(endpoint, params={"access_token": pixel['access_token']}, json=payload, timeout=15)
+
+    ok = resp.status_code == 200
+    st_sigla = normalizar_estado(state) if state else ""
+    print(f"[META-{pixel['name']}] {'v' if ok else 'x'} id={conversion_id} value=R${value:.2f} "
+          f"fbp={'s' if fbp else 'n'} fbc={'s' if fbc else 'n'} ip={'s' if ip else 'n'} ua={'s' if ua else 'n'} "
+          f"ct={'s' if city else 'n'} st={st_sigla or 'n'} items={len(items)}")
+    return ok
+
+# ─────────────────────────────────────────
+# CARREGA SHEET PINTEREST
+# ─────────────────────────────────────────
+def load_sheets_pinterest() -> dict:
+    cache = {}
+    for sheet_id in SHEET_IDS_PINTEREST:
+        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:json&sheet=pinterest_clicks"
+        try:
+            resp  = requests.get(url, timeout=30)
+            text  = resp.text.strip()
+            match = re.search(r"\((.*)\);?\s*$", text, re.DOTALL)
+            if not match: continue
+            data  = json.loads(match.group(1))
+            rows  = data.get("table", {}).get("rows", [])
+            for row in rows:
+                cols        = row.get("c", [])
+                if len(cols) < 2: continue
+                ext_id      = str(cols[1].get("v", "") or "").strip() if cols[1] else ""
+                epik        = str(cols[2].get("v", "") or "").strip() if len(cols) > 2 and cols[2] else ""
+                epik_cookie = str(cols[3].get("v", "") or "").strip() if len(cols) > 3 and cols[3] else ""
+                if ext_id:
+                    cache[ext_id] = {"click_id": epik or epik_cookie}
+        except Exception as e:
+            print(f"[SHEETS PINTEREST] Erro: {e}")
+    return cache
+
+# ─────────────────────────────────────────
+# ENVIA PINTEREST CAPI
+# ─────────────────────────────────────────
+def send_to_pinterest(conversion: dict, external_id: str, click_id: str) -> bool:
+    try:
+        value = float(conversion.get("totalCommission") or 0)
+    except:
+        value = 0.0
+
+    conversion_id = str(conversion.get("conversionId", ""))
+    event_time    = conversion.get("purchaseTime") or int(time.time())
+
+    user_data = {"external_id": sha256(external_id)}
+    if click_id: user_data["click_id"] = click_id
+
+    payload = {"data": [{
+        "event_name":    "checkout",
+        "event_time":    event_time,
+        "event_id":      f"pint_{conversion_id}",
+        "action_source": "website",
+        "user_data":     user_data,
+        "custom_data":   {"value": round(value, 2), "currency": "BRL", "order_id": conversion_id}
+    }]}
+
+    try:
+        resp = requests.post(
+            PINTEREST_ENDPOINT,
+            headers={"Authorization": f"Bearer {PINTEREST_ACCESS_TOKEN}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=15
+        )
+        ok = resp.status_code in (200, 201)
+        print(f"[PINTEREST] {'v' if ok else 'x'} id={conversion_id} value=R${value:.2f}")
+        return ok
+    except requests.exceptions.Timeout:
+        print(f"[PINTEREST] TIMEOUT id={conversion_id} — pulando")
+        return False
+    except Exception as e:
+        print(f"[PINTEREST] ERRO id={conversion_id} — {e}")
+        return False
+
+# ─────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────
+def main():
+    print(f"\n{'='*50}")
+    print(f"[START] {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"Pixels configurados: {[p['name'] for p in PIXELS if p['pixel_id']]}")
+    print(f"{'='*50}")
+
+    sent_meta      = load_sent(SENT_FILE_META)
+    sent_pinterest = load_sent(SENT_FILE_PINTEREST)
+    print(f"[ANTI-DUPLICATA] Meta: {len(sent_meta)} | Pinterest: {len(sent_pinterest)}")
+
+    conversions = fetch_conversions()
+    print(f"[SHOPEE] Total: {len(conversions)} conversoes")
+
+    sheets_per_pixel = {
+        p["name"]: load_sheets_meta(p["sheet_ids"])
+        for p in PIXELS if p["pixel_id"]
+    }
+    sheets_pinterest = load_sheets_pinterest()
+
+    valid_statuses = {"PENDING", "COMPLETED"}
+    stats = {p["name"]: {"new": 0, "skip": 0, "skip_valor": 0} for p in PIXELS if p["pixel_id"]}
+
+    for conv in conversions:
+        conversion_id = str(conv.get("conversionId", ""))
+
+        has_valid_order = any(
+            o.get("orderStatus", "").upper() in valid_statuses
+            for o in conv.get("orders", [])
+        )
+        if not has_valid_order:
+            continue
+
+        utm         = conv.get("utmContent", "") or ""
+        external_id = extract_external_id(utm)
+
+        if not external_id:
+            print(f"[SKIP] id={conversion_id} sem external_id em: {utm}")
+            continue
+
+        pixel = find_pixel_for_uc(utm)
+
+        if not pixel:
+            print(f"[NO PIXEL] id={conversion_id} uc={utm[:10]}... — sem pixel para esse prefixo")
+            continue
+
+        try:
+            value = float(conv.get("totalCommission") or 0)
+        except:
+            value = 0.0
+
+        min_commission = pixel.get("min_commission", 0.0)
+        if value < min_commission:
+            print(f"[SKIP VALOR] id={conversion_id} pixel={pixel['name']} value=R${value:.2f} < minimo=R${min_commission:.2f}")
+            stats[pixel["name"]]["skip_valor"] += 1
+
+        else:
+            if conversion_id not in sent_meta:
+                entry = sheets_per_pixel[pixel["name"]].get(external_id, {})
+                ip    = entry.get("ip", "")
+
+                # Consulta geo em tempo real (na hora do envio da compra)
+                # Só retorna city/state se a rede for confiável (residencial real)
+                city, state = geo_confiavel(ip)
+
+                # Filtra IP de rede móvel/CGNAT/proxy/hosting -> evita alerta
+                # "client_ip_address associado a vários usuários" no Meta
+                ip_para_envio = ip_seguro_para_meta(ip)
+
+                success = send_to_meta(
+                    conv, pixel, external_id,
+                    entry.get("fbp", ""),
+                    entry.get("fbc", ""),
+                    ip_para_envio,
+                    entry.get("ua", ""),
+                    city,
+                    state,
+                    "br",
+                    "",
+                    entry.get("src_url", "")
+                )
+                if success:
+                    sent_meta.add(conversion_id)
+                    stats[pixel["name"]]["new"] += 1
+            else:
+                stats[pixel["name"]]["skip"] += 1
+
+        if conversion_id not in sent_pinterest:
+            entry   = sheets_pinterest.get(external_id, {})
+            success = send_to_pinterest(conv, external_id, entry.get("click_id", ""))
+            if success:
+                sent_pinterest.add(conversion_id)
+
+    save_sent(sent_meta,      SENT_FILE_META)
+    save_sent(sent_pinterest, SENT_FILE_PINTEREST)
+
+    print(f"\n{'='*50}")
+    for name, s in stats.items():
+        print(f"[META-{name}] Enviados: {s['new']} | Skip duplicata: {s['skip']} | Skip valor baixo: {s['skip_valor']}")
+    print(f"{'='*50}\n")
+
+if __name__ == "__main__":
+    main()
