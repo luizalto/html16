@@ -25,15 +25,20 @@ function getUserId(){
 }
 const userId = getUserId()
 
-fbq('init', '971266505644349', { external_id: userId })
-fbq('track', 'PageView', { external_id: userId })
-
-function enviarEvento(valor){
-  if(!valor) return
-  const nome = valor.replace(/[^a-zA-Z0-9]/g, "")
-  if(!nome) return
-  try { fbq('trackCustom', nome, { external_id: userId }) } catch {}
+// ========== EVENT ID HELPER ==========
+function gerarEventId(eventName){
+  return userId + '_' + Date.now() + '_' + eventName
 }
+
+fbq('init', '971266505644349', { external_id: userId })
+// PageView com event_id
+fbq('track', 'PageView', { external_id: userId, event_id: gerarEventId('PageView') })
+
+// trackCustom DESATIVADO — gerava 20+ eventos por clique sem event_id
+// determinístico (Date.now() mudava a cada disparo), poluindo o dataset
+// do pixel sem nenhum benefício de otimização (trackCustom não participa
+// do algoritmo de lance/otimização das campanhas, só PageView/ViewContent/Purchase).
+function enviarEvento(valor){ /* no-op */ }
 
 // ========== SHA256 para ct/st/country ==========
 async function sha256(str){
@@ -117,22 +122,40 @@ const sourceTag    = classSrc(srcRaw)
 // GEOLOCALIZAÇÃO — todas as APIs em paralelo
 // =========================================================
 async function fetchAPI(url) {
-  const resp = await fetch(url, { signal: AbortSignal.timeout(1500) })
+  const resp = await fetch(url, { signal: AbortSignal.timeout(1200) })
   if (!resp.ok) throw new Error("bad response")
   return resp.json()
 }
 
 function extrairGeo(d) {
-  const rc = (d.region_code || d.regionCode || "")
+  // Formatos suportados:
+  // ipwho.is:      region_code, region (nome), city, ip
+  // freeipapi.com: regionCode, regionName, cityName, ipAddress
+  // ipinfo.io:     region (nome completo), city, ip  ← sem código de 2 letras
+  // ipapi.co:      region_code, region (nome), city, ip
+
+  const rcExplicito = (d.region_code || d.regionCode || "")
     .replace(/[^A-Za-z]/g, "").toUpperCase()
+  // ipinfo.io: d.region = "São Paulo" (longo) → não usa como código
+  const rcImplicito = (d.region && d.region.replace(/[^A-Za-z]/g,"").length <= 3)
+    ? d.region.replace(/[^A-Za-z]/g, "").toUpperCase()
+    : ""
+  const rc    = rcExplicito.length === 2 ? rcExplicito : rcImplicito
   const state = rc.length === 2 ? rc : "ZZ"
+
   const cityRaw = (d.city || d.cityName || "")
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-zA-Z]/g, "").toUpperCase()
   const city = cityRaw.slice(0, 6) || "ZZ"
-  const ip = d.ip || d.ipAddress || d.query || ""
-  const region = d.region || d.regionName || ""
-  return { state, city, city_full: d.city || d.cityName || "", state_full: region, ip }
+  const ip   = d.ip || d.ipAddress || d.query || ""
+
+  // state_full: nome completo do estado
+  // Para ipinfo.io: d.region = "São Paulo" (length > 3 → usa como nome)
+  const regionFull = d.regionName
+    || (d.region && d.region.replace(/[^a-zA-Z ]/g,"").length > 3 ? d.region : "")
+    || d.region_name || ""
+
+  return { state, city, city_full: d.city || d.cityName || "", state_full: regionFull, ip }
 }
 
 const GEO_CACHE_KEY = "geo_cache"
@@ -144,25 +167,34 @@ async function medirGeo() {
     if (cached && cached.expires > Date.now() && cached.data.ip) return cached.data
   } catch {}
 
-  const [r1, r2, r3, r4] = await Promise.allSettled([
-    fetchAPI("https://ipapi.co/json/"),
+  // Ordem por limite generosidade: ipwho.is (sem limite) → freeipapi (sem limite)
+  // → ipinfo.io (50k/mês) → ipapi.co (30k/mês, mais restritivo, último)
+  // Todas chamadas em paralelo; prioridade definida no loop abaixo
+  const [r1, r2, r3, r4, r5] = await Promise.allSettled([
     fetchAPI("https://ipwho.is/"),
     fetchAPI("https://freeipapi.com/api/json"),
-    fetchAPI("https://api64.ipify.org?format=json")
+    fetchAPI("https://ipinfo.io/json"),
+    fetchAPI("https://ipapi.co/json/"),
+    fetchAPI("https://api64.ipify.org?format=json")   // fallback só IP
   ])
 
-  let data = null
-  for (const r of [r1, r2, r3]) {
-    if (r.status === "fulfilled") {
-      const d = extrairGeo(r.value)
-      if (d.ip) { data = d; break }
-    }
+  // Percorre em ordem de prioridade: usa o primeiro que trouxer IP + cidade/estado
+  let data       = null
+  let dataIpOnly = null  // fallback: tem IP mas sem geo
+  for (const r of [r1, r2, r3, r4]) {
+    if (r.status !== "fulfilled") continue
+    const d = extrairGeo(r.value)
+    if (d.ip && (d.city_full || d.state_full)) { data = d; break }
+    if (d.ip && !dataIpOnly) dataIpOnly = d
   }
 
-  if (!data || !data.ip) {
-    const ipOnly = r4.status === "fulfilled" ? (r4.value.ip || "") : ""
-    if (!data) data = { state: "ZZ", city: "ZZ", city_full: "", state_full: "", ip: "" }
-    if (ipOnly) data = { ...data, ip: ipOnly }
+  if (!data) {
+    const ipFallback = r5.status === "fulfilled" ? (r5.value.ip || "") : ""
+    if (!dataIpOnly) {
+      data = { state: "ZZ", city: "ZZ", city_full: "", state_full: "", ip: ipFallback }
+    } else {
+      data = ipFallback ? { ...dataIpOnly, ip: ipFallback } : dataIpOnly
+    }
   }
 
   if (!data) data = { state: "ZZ", city: "ZZ", city_full: "", state_full: "", ip: "" }
@@ -287,7 +319,7 @@ const [velTag, batObj, movimento, redeTag, geo] = await Promise.all([
   timeout(medirBateria(),    200,  { bateria:"", carregando:"" }),
   timeout(medirMovimento(),  200,  "M0"),
   timeout(medirWebRTC(),     950,  "RU"),
-  timeout(medirGeo(),        2500, { state:"ZZ", city:"ZZ", city_full:"", state_full:"", ip:"" })
+  timeout(medirGeo(),       2000, { state:"ZZ", city:"ZZ", city_full:"", state_full:"", ip:"" })
 ])
 const ram = medirRAM()
 
@@ -336,7 +368,14 @@ async function getFbpWithRetry(maxTentativas = 5, intervaloMs = 100) {
 }
 const fbpValue = await getFbpWithRetry(5, 100);
 const FBP = (fbpValue !== "") ? 1 : 0;
-const fbcValue = getCookie("_fbc") || params.get("fbclid") || "";
+
+// ========== fbc formatado corretamente ==========
+let fbcValue = getCookie("_fbc") || "";
+const fbclid = params.get("fbclid") || "";
+if (!fbcValue && fbclid) {
+  const timestamp = Math.floor(Date.now() / 1000);
+  fbcValue = `fb.1.${timestamp}.${fbclid}`;
+}
 const FBC = (fbcValue !== "") ? 1 : 0;
 
 const HP_PADRAO = 20
@@ -355,7 +394,7 @@ if(hp===1){
 const browserTag = /EX(?=ID)/i.test(UC) ? "EX" : /IX(?=ID)/i.test(UC) ? "IX" : "Outros"
 
 // =========================================================
-// EVENTOS META
+// EVENTOS META (com event_id)
 // =========================================================
 const eventosBasicos = [
   tempoTag, velTag, batObj.bateria, batObj.carregando,
@@ -415,8 +454,8 @@ const topTag = bateuTop06?"F6":bateuTop05?"F5":bateuTop04?"F4":bateuTop03?"F3":b
 const idTag = "ID" + userId
 
 const corpoParts = [
-  baseUC, tempoTag, velTag, batObj.bateria, batObj.carregando,
-  tema, ram, vib, device, conexao, movimento, redeTag,
+  baseUC,
+  tema, device, conexao, redeTag,
   placementTag, sourceTag
 ]
 
@@ -439,7 +478,7 @@ const [ctHash, stHash, countryHash] = await Promise.all([
 ])
 
 // =========================================================
-// VIEW CONTENT — com geo em hash (formato correto Meta)
+// VIEW CONTENT — com event_id
 // =========================================================
 try {
   const vcData = {
@@ -449,6 +488,7 @@ try {
     currency:     'BRL',
     external_id:  userId,
     country:      countryHash,
+    event_id:     gerarEventId('ViewContent')  // ← NOVO
   }
   if(ctHash) vcData.ct = ctHash
   if(stHash) vcData.st = stHash
@@ -471,15 +511,17 @@ if(DEBUG){
     "finalUC:    [" + finalUC       + "] (" + finalUC.length + " chars)\n" +
     "userId:     [" + userId        + "]\n" +
     "_fbp:       [" + fbpValue      + "]\n" +
+    "fbc:        [" + fbcValue      + "]\n" +  // ← NOVO
     "ip:         [" + geo.ip        + "]\n" +
     "ua:         [" + ua            + "]\n" +
     "ct_hash:    [" + (ctHash||"")  + "]\n" +
-    "st_hash:    [" + (stHash||"")  + "]"
+    "st_hash:    [" + (stHash||"")  + "]\n" +
+    "page_url:   [" + window.location.href + "]"  // ← NOVO
   )
 }
 
 // =========================================================
-// GOOGLE SHEETS
+// GOOGLE SHEETS — com page_url
 // =========================================================
 try {
   const agora     = new Date()
@@ -501,7 +543,8 @@ try {
       city    : geo.city_full  || "",
       country : "br",
       zip     : ""
-    })
+    }),
+    page_url: window.location.href  // ← NOVO
   }
   if(ENABLE_PARIDADE && paridadeTag) payload.paridade = paridadeTag
 
