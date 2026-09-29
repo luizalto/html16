@@ -556,9 +556,11 @@ try {
   const payload   = {
     data_hora,
     external_id        : userId,
-    fbc                : fbcValue,
+    // Coluna fbc REUTILIZADA: quando é clique TikTok, grava o ttclid nela
+    // (evita mexer no Apps Script / criar coluna nova na planilha).
+    // Se for clique Meta, grava o fbc normal.
+    fbc                : ttclidValue || fbcValue,
     fbp                : fbpValue,
-    ttclid             : ttclidValue,
     placement          : placementTag,
     source             : sourceTag,
     device,
