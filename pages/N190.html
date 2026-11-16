@@ -481,8 +481,10 @@ const [ctHash, stHash, countryHash] = await Promise.all([
 // =========================================================
 // VIEW CONTENT — com event_id
 // =========================================================
+// fora do try de propósito: o redirect precisa ler vcEventId (escopo de bloco)
+let vcEventId = ""
 try {
-  const vcEventId = gerarEventId('ViewContent')  // ← NOVO
+  vcEventId = gerarEventId('ViewContent')  // ← NOVO
   const vcData = {
     content_ids:  [baseUC],
     content_type: 'product',
