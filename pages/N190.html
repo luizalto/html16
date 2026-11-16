@@ -32,7 +32,8 @@ function gerarEventId(eventName){
 
 fbq('init', '1182369083930935', { external_id: userId })
 // PageView com event_id
-fbq('track', 'PageView', { external_id: userId, event_id: gerarEventId('PageView') })
+const pvEventId = gerarEventId('PageView')
+fbq('track', 'PageView', { external_id: userId, event_id: pvEventId })
 
 // trackCustom DESATIVADO — gerava 20+ eventos por clique sem event_id
 // determinístico (Date.now() mudava a cada disparo), poluindo o dataset
@@ -481,6 +482,7 @@ const [ctHash, stHash, countryHash] = await Promise.all([
 // VIEW CONTENT — com event_id
 // =========================================================
 try {
+  const vcEventId = gerarEventId('ViewContent')  // ← NOVO
   const vcData = {
     content_ids:  [baseUC],
     content_type: 'product',
@@ -488,7 +490,7 @@ try {
     currency:     'BRL',
     external_id:  userId,
     country:      countryHash,
-    event_id:     gerarEventId('ViewContent')  // ← NOVO
+    event_id:     vcEventId
   }
   if(ctHash) vcData.ct = ctHash
   if(stHash) vcData.st = stHash
@@ -521,46 +523,32 @@ if(DEBUG){
 }
 
 // =========================================================
-// GOOGLE SHEETS — com page_url
+// GOOGLE SHEETS — REMOVIDO DAQUI
+// Quem grava a planilha agora é o tracker (Render), na hora do clique,
+// com o utm SERVIDO — a página não conhece esse valor. Os dados abaixo
+// são enviados ao tracker via parâmetros no redirect (bloco REDIRECT).
 // =========================================================
-try {
-  const agora     = new Date()
-  const data_hora = agora.toLocaleString("pt-BR",{timeZone:"America/Sao_Paulo"})
-  const payload   = {
-    data_hora,
-    external_id        : userId,
-    fbc                : fbcValue,
-    fbp                : fbpValue,
-    placement          : placementTag,
-    source             : sourceTag,
-    device,
-    client_ip_address  : geo.ip || "",
-    client_user_agent  : ua,
-    velocidade         : velTag,
-    uc_completo        : finalUC,
-    geo_data           : JSON.stringify({
-      state   : geo.state_full || "",
-      city    : geo.city_full  || "",
-      country : "br",
-      zip     : ""
-    }),
-    page_url: window.location.href  // ← NOVO
-  }
-  if(ENABLE_PARIDADE && paridadeTag) payload.paridade = paridadeTag
-
-  fetch(SHEETS_URL, {
-    method   : "POST",
-    mode     : "no-cors",
-    headers  : { "Content-Type": "application/json" },
-    body     : JSON.stringify(payload),
-    keepalive: true
-  }).catch(()=>{})
-} catch(e){}
 
 // =========================================================
 // REDIRECT
 // =========================================================
+const ck = document.cookie || ""
+const fbpM = ck.match(/_fbp=([^;]+)/)
+const fbcM = ck.match(/_fbc=([^;]+)/)
+const geoJSON = JSON.stringify({
+  state   : geo.state_full || "",
+  city    : geo.city_full  || "",
+  country : "br",
+  zip     : ""
+})
 const url = `https://shopee-utm-tracker.onrender.com/?link=${encodeURIComponent(LINK)}&uc=${finalUC}`
+  + `&fbp=${encodeURIComponent(fbpM ? fbpM[1] : "")}`
+  + `&fbc=${encodeURIComponent(fbcM ? fbcM[1] : "")}`
+  + `&geo=${encodeURIComponent(geoJSON)}`
+  + `&pageurl=${encodeURIComponent(window.location.href)}`
+  + `&px=1182369083930935`
+  + `&pveid=${encodeURIComponent(typeof pvEventId !== "undefined" ? pvEventId : "")}`
+  + `&vceid=${encodeURIComponent(typeof vcEventId !== "undefined" ? vcEventId : "")}`
 setTimeout(() => { window.location.href = url }, 800)
 
 })();
